@@ -287,6 +287,8 @@ class FakeCeClient:
                         {"Keys": ["arn:aws:sqs:us-west-2:123456789012:orders-queue-us-west-2", "Amazon Simple Queue Service"], "Metrics": {"UnblendedCost": {"Amount": "0.2"}}},
                         {"Keys": ["arn:aws:sns:us-west-2:123456789012:orders-topic-us-west-2", "Amazon Simple Notification Service"], "Metrics": {"UnblendedCost": {"Amount": "0.1"}}},
                         {"Keys": ["orders-api-us-west-2", "Amazon API Gateway"], "Metrics": {"UnblendedCost": {"Amount": "0.4"}}},
+                        {"Keys": ["orders web edge", "Amazon CloudFront"], "Metrics": {"UnblendedCost": {"Amount": "1.7"}}},
+                        {"Keys": ["cache orders", "Amazon ElastiCache"], "Metrics": {"UnblendedCost": {"Amount": "0.8"}}},
                         {"Keys": ["mystery-resource", "AWS Lambda"], "Metrics": {"UnblendedCost": {"Amount": "1.2"}}},
                     ],
                 }
@@ -351,6 +353,18 @@ def test_aws_collector_uses_tagging_as_primary_inventory_source() -> None:
     unattributed = next(cost for cost in bundle.costs if cost.resource_id == "unattributed")
     assert unattributed.mtd_cost_usd == 1.2
     assert bundle.warnings == []
+
+    api_cost = next(cost for cost in bundle.costs if cost.resource_id == api_service.resource_id)
+    assert api_cost.attribution_method.value == "DIRECT"
+    assert "resource_id:orders-api-us-west-2" in api_cost.matched_by
+
+    cloudfront_cost = next(cost for cost in bundle.costs if cost.resource_id.endswith("distribution/DIST123"))
+    assert cloudfront_cost.attribution_method.value == "TAG_MATCH"
+    assert any(item.startswith("tag_match:") for item in cloudfront_cost.matched_by)
+
+    elasticache_cost = next(cost for cost in bundle.costs if cost.resource_id.endswith("orders-cache-us-west-2"))
+    assert elasticache_cost.attribution_method.value == "BEST_EFFORT"
+    assert any(item.startswith("best_effort:") for item in elasticache_cost.matched_by)
 
     assert next(service for service in bundle.services if service.service_name == "ec2").status.value == "ACTIVE"
     assert next(service for service in bundle.services if service.service_name == "rds").status.value == "ACTIVE"
@@ -425,7 +439,7 @@ def _tagging_items_for_region(region: str | None):
         ]
     return [
         {"ResourceARN": "arn:aws:s3:::orders-artifacts", "ResourceType": "s3:bucket", "Tags": [{"Key": "Environment", "Value": "tagging"}]},
-        {"ResourceARN": "arn:aws:cloudfront::123456789012:distribution/DIST123", "ResourceType": "cloudfront:distribution", "Tags": [{"Key": "Environment", "Value": "tagging"}]},
+        {"ResourceARN": "arn:aws:cloudfront::123456789012:distribution/DIST123", "ResourceType": "cloudfront:distribution", "Tags": [{"Key": "Environment", "Value": "tagging"}, {"Key": "Project", "Value": "orders web edge"}]},
     ]
 
 

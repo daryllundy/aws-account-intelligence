@@ -69,6 +69,7 @@ class ScanPipeline:
             total_mtd_cost_usd=round(sum(cost.mtd_cost_usd for cost in costs), 2),
             total_projected_monthly_cost_usd=round(sum(cost.projected_monthly_cost_usd for cost in costs), 2),
             unattributed_cost_usd=round(unattributed, 2),
+            cost_freshness_at=scan.completed_at,
             costs=costs,
         )
 

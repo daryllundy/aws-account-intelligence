@@ -878,7 +878,10 @@ class AwsCollector:
 
 def _build_cost_attributions(scan_run_id: str, services: list[ServiceRecord], ce_response: dict[str, Any]) -> list[CostAttribution]:
     service_index = _resource_index(services)
-    buckets: dict[str, dict[str, Any]] = defaultdict(lambda: {"daily": [], "total": 0.0, "service": None})
+    service_map = {service.resource_id: service for service in services}
+    buckets: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {"daily": [], "total": 0.0, "service": None, "methods": set(), "signals": set(), "confidence": 0.0}
+    )
     unattributed_daily: list[CostPoint] = []
     unattributed_total = 0.0
 
@@ -888,15 +891,26 @@ def _build_cost_attributions(scan_run_id: str, services: list[ServiceRecord], ce
             resource_key = group["Keys"][0]
             service_label = group["Keys"][1]
             amount = float(group["Metrics"]["UnblendedCost"]["Amount"])
-            normalized = service_index.get(resource_key) or service_index.get(_normalize_ce_resource_id(resource_key))
-            if normalized is None:
+            normalized_key = _normalize_ce_resource_id(resource_key)
+            direct_match = service_index.get(resource_key) or service_index.get(normalized_key)
+            matched_resource_id, method, signal, confidence = _resolve_cost_match(
+                direct_match,
+                normalized_key,
+                service_label,
+                services,
+                service_map,
+            )
+            if matched_resource_id is None:
                 unattributed_total += amount
                 unattributed_daily.append(CostPoint(date=day, amount_usd=amount))
                 continue
-            bucket = buckets[normalized]
+            bucket = buckets[matched_resource_id]
             bucket["service"] = SERVICE_LABELS.get(service_label)
             bucket["daily"].append(CostPoint(date=day, amount_usd=amount))
             bucket["total"] += amount
+            bucket["methods"].add(method.value)
+            bucket["signals"].add(signal)
+            bucket["confidence"] = max(bucket["confidence"], confidence)
 
     attributions: list[CostAttribution] = []
     for service in services:
@@ -905,6 +919,7 @@ def _build_cost_attributions(scan_run_id: str, services: list[ServiceRecord], ce
             total = round(bucket["total"], 2)
             daily_costs = bucket["daily"]
             prior = round(total * 0.9, 2)
+            method = _summarize_method(bucket["methods"])
             attributions.append(
                 CostAttribution(
                     resource_id=service.resource_id,
@@ -914,8 +929,9 @@ def _build_cost_attributions(scan_run_id: str, services: list[ServiceRecord], ce
                     projected_monthly_cost_usd=_project_monthly(total, len(daily_costs)),
                     prior_30_day_cost_usd=prior,
                     trend_delta_usd=round(total - prior, 2),
-                    attribution_method=AttributionMethod.DIRECT,
-                    confidence=0.95,
+                    attribution_method=method,
+                    confidence=bucket["confidence"] or _default_confidence(method),
+                    matched_by=sorted(bucket["signals"]),
                 )
             )
             continue
@@ -925,6 +941,7 @@ def _build_cost_attributions(scan_run_id: str, services: list[ServiceRecord], ce
                 scan_run_id=scan_run_id,
                 attribution_method=AttributionMethod.UNATTRIBUTED,
                 confidence=0.0,
+                matched_by=[],
             )
         )
 
@@ -940,9 +957,122 @@ def _build_cost_attributions(scan_run_id: str, services: list[ServiceRecord], ce
                 trend_delta_usd=round(unattributed_total * 0.1, 2),
                 attribution_method=AttributionMethod.UNATTRIBUTED,
                 confidence=0.1,
+                matched_by=["unmatched_cost_lines"],
             )
         )
     return attributions
+
+
+def _resolve_cost_match(
+    direct_match: str | None,
+    normalized_key: str,
+    service_label: str,
+    services: list[ServiceRecord],
+    service_map: dict[str, ServiceRecord],
+) -> tuple[str | None, AttributionMethod | None, str | None, float]:
+    if direct_match:
+        return direct_match, AttributionMethod.DIRECT, f"resource_id:{normalized_key}", 0.98
+
+    tag_match = _find_tag_match(normalized_key, service_label, services)
+    if tag_match:
+        return tag_match, AttributionMethod.TAG_MATCH, f"tag_match:{normalized_key}", 0.8
+
+    best_effort = _find_best_effort_match(normalized_key, service_label, services, service_map)
+    if best_effort:
+        return best_effort, AttributionMethod.BEST_EFFORT, f"best_effort:{normalized_key}", 0.55
+
+    return None, None, None, 0.0
+
+
+def _find_tag_match(normalized_key: str, service_label: str, services: list[ServiceRecord]) -> str | None:
+    tokens = _cost_tokens(normalized_key)
+    if not tokens:
+        return None
+    target_service = SERVICE_LABELS.get(service_label)
+    candidates = [
+        service for service in services if service.service_name == target_service and _tag_token_overlap(service.tags, tokens)
+    ]
+    if len(candidates) == 1:
+        return candidates[0].resource_id
+    return None
+
+
+def _find_best_effort_match(
+    normalized_key: str,
+    service_label: str,
+    services: list[ServiceRecord],
+    service_map: dict[str, ServiceRecord],
+) -> str | None:
+    target_service = SERVICE_LABELS.get(service_label)
+    if not target_service:
+        return None
+    tokens = _cost_tokens(normalized_key)
+    if not tokens:
+        return None
+    ranked: list[tuple[int, str]] = []
+    for service in services:
+        if service.service_name != target_service:
+            continue
+        score = 0
+        score += len(_resource_tokens(service) & tokens) * 3
+        score += len(_tag_tokens(service.tags) & tokens)
+        if score > 0:
+            ranked.append((score, service.resource_id))
+    if not ranked:
+        return None
+    ranked.sort(reverse=True)
+    if len(ranked) == 1 or ranked[0][0] > ranked[1][0]:
+        return ranked[0][1]
+    return None
+
+
+def _resource_tokens(service: ServiceRecord) -> set[str]:
+    tokens: set[str] = set()
+    tokens.update(_cost_tokens(service.resource_id))
+    tokens.update(_cost_tokens(service.arn))
+    tokens.update(_tag_tokens(service.tags))
+    for key in ("instance_id", "db_instance_identifier", "function_name", "bucket_name", "queue_name", "topic_name", "api_id", "api_name", "cluster_name", "cache_cluster_id", "distribution_id"):
+        value = service.metadata.get(key)
+        if value:
+            tokens.update(_cost_tokens(str(value)))
+    return tokens
+
+
+def _tag_tokens(tags: dict[str, str]) -> set[str]:
+    tokens: set[str] = set()
+    for key, value in tags.items():
+        if key.lower() in {"name", "application", "app", "service", "owner", "project"}:
+            tokens.update(_cost_tokens(value))
+    return tokens
+
+
+def _tag_token_overlap(tags: dict[str, str], tokens: set[str]) -> bool:
+    return bool(_tag_tokens(tags) & tokens)
+
+
+def _cost_tokens(value: str) -> set[str]:
+    token = "".join(char if char.isalnum() else " " for char in value.lower())
+    return {part for part in token.split() if len(part) > 2}
+
+
+def _summarize_method(methods: set[str]) -> AttributionMethod:
+    if AttributionMethod.DIRECT.value in methods:
+        return AttributionMethod.DIRECT
+    if AttributionMethod.TAG_MATCH.value in methods:
+        return AttributionMethod.TAG_MATCH
+    if AttributionMethod.BEST_EFFORT.value in methods:
+        return AttributionMethod.BEST_EFFORT
+    return AttributionMethod.UNATTRIBUTED
+
+
+def _default_confidence(method: AttributionMethod) -> float:
+    if method is AttributionMethod.DIRECT:
+        return 0.98
+    if method is AttributionMethod.TAG_MATCH:
+        return 0.8
+    if method is AttributionMethod.BEST_EFFORT:
+        return 0.55
+    return 0.0
 
 
 def _resource_index(services: list[ServiceRecord]) -> dict[str, str]:

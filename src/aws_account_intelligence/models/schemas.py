@@ -66,6 +66,7 @@ class CostAttribution(BaseModel):
     attribution_method: AttributionMethod = AttributionMethod.UNATTRIBUTED
     confidence: float = 0.0
     currency: Literal["USD"] = "USD"
+    matched_by: list[str] = Field(default_factory=list)
 
 
 class DependencyEdge(BaseModel):
@@ -120,6 +121,7 @@ class CostSummaryResponse(BaseModel):
     total_mtd_cost_usd: float
     total_projected_monthly_cost_usd: float
     unattributed_cost_usd: float
+    cost_freshness_at: datetime | None = None
     costs: list[CostAttribution]
 
 

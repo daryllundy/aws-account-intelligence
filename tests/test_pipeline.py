@@ -24,6 +24,8 @@ def test_scan_pipeline_persists_snapshot() -> None:
     assert any(edge.evidence_source == "apigateway.integration" for edge in edges)
     assert scan.summary["warnings"] == []
     assert scan.summary["warning_count"] == 0
+    cost_summary = pipeline.costs(scan.scan_run_id)
+    assert cost_summary.cost_freshness_at is not None
 
 
 def test_scan_pipeline_persists_structured_warnings(monkeypatch) -> None:

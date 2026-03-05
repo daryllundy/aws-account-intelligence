@@ -60,6 +60,7 @@ class CostAttributionRow(Base):
     attribution_method: Mapped[str] = mapped_column(String(32))
     confidence: Mapped[float] = mapped_column(Float)
     currency: Mapped[str] = mapped_column(String(8), default="USD")
+    matched_by: Mapped[list] = mapped_column(JSON, default=list)
 
 
 class DependencyEdgeRow(Base):
@@ -150,6 +151,7 @@ class Database:
                         attribution_method=cost.attribution_method.value,
                         confidence=cost.confidence,
                         currency=cost.currency,
+                        matched_by=cost.matched_by,
                     )
                 )
 
@@ -237,6 +239,7 @@ def _cost_from_row(row: CostAttributionRow) -> CostAttribution:
         attribution_method=row.attribution_method,
         confidence=row.confidence,
         currency=row.currency,
+        matched_by=row.matched_by or [],
     )
 
 
