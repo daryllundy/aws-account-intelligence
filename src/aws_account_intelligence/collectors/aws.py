@@ -22,6 +22,10 @@ SERVICE_LABELS = {
     "Amazon Simple Queue Service": "sqs",
     "Amazon Simple Notification Service": "sns",
     "Amazon API Gateway": "apigateway",
+    "Amazon Elastic Container Service": "ecs",
+    "Amazon Elastic Kubernetes Service": "eks",
+    "Amazon ElastiCache": "elasticache",
+    "Amazon CloudFront": "cloudfront",
 }
 TAGGING_RESOURCE_TYPES = {
     "ec2": ["ec2:instance"],
@@ -31,6 +35,10 @@ TAGGING_RESOURCE_TYPES = {
     "sqs": ["sqs:queue"],
     "sns": ["sns:topic"],
     "apigateway": ["apigateway:restapis"],
+    "ecs": ["ecs:cluster"],
+    "eks": ["eks:cluster"],
+    "elasticache": ["elasticache:cluster"],
+    "cloudfront": ["cloudfront:distribution"],
 }
 THROTTLE_CODES = {
     "Throttled",
@@ -55,6 +63,9 @@ class AwsCollector:
             ("sqs", self._collect_sqs),
             ("sns", self._collect_sns),
             ("apigateway", self._collect_apigateway),
+            ("ecs", self._collect_ecs),
+            ("eks", self._collect_eks),
+            ("elasticache", self._collect_elasticache),
         ]
 
     def load(self, scan_run_id: str) -> DiscoveryBundle:
@@ -82,7 +93,10 @@ class AwsCollector:
             inventory[region] = {item["arn"]: item for item in items}
             warnings.extend(item_warnings)
 
-        global_items, global_warnings = self._guarded_tagging_collect("global", lambda: self._fetch_tagging_resources("us-east-1", service_names=["s3"]))
+        global_items, global_warnings = self._guarded_tagging_collect(
+            "global",
+            lambda: self._fetch_tagging_resources("us-east-1", service_names=["s3", "cloudfront"]),
+        )
         inventory["global"] = {item["arn"]: item for item in global_items}
         warnings.extend(global_warnings)
         return inventory, warnings
@@ -114,6 +128,13 @@ class AwsCollector:
         )
         services.extend(s3_services)
         warnings.extend(s3_warnings)
+        cloudfront_services, cloudfront_warnings = self._guarded_collect(
+            "cloudfront",
+            "global",
+            lambda: self._collect_cloudfront(scan_run_id, account_id, tag_inventory.get("global", {})),
+        )
+        services.extend(cloudfront_services)
+        warnings.extend(cloudfront_warnings)
         return services, warnings
 
     def _collect_region(
@@ -440,6 +461,135 @@ class AwsCollector:
                 break
         return records
 
+    def _collect_ecs(self, scan_run_id: str, account_id: str, region: str, tag_index: dict[str, dict[str, Any]]) -> list[ServiceRecord]:
+        client = self.session.client("ecs", region_name=region)
+        cluster_arns = client.list_clusters().get("clusterArns", [])
+        if not cluster_arns:
+            return []
+        response = client.describe_clusters(clusters=cluster_arns, include=["TAGS"])
+        records: list[ServiceRecord] = []
+        for cluster in response.get("clusters", []):
+            arn = cluster["clusterArn"]
+            records.append(
+                ServiceRecord(
+                    resource_id=arn,
+                    arn=arn,
+                    resource_type="AWS::ECS::Cluster",
+                    service_name="ecs",
+                    region=region,
+                    account_id=account_id,
+                    tags=self._merged_tags(arn, tag_index, _tag_map(cluster.get("tags", []))),
+                    status=ResourceStatus.ACTIVE,
+                    last_seen_at=datetime.now(UTC),
+                    scan_run_id=scan_run_id,
+                    metadata={
+                        "cluster_name": cluster.get("clusterName"),
+                        "registered_container_instances_count": cluster.get("registeredContainerInstancesCount", 0),
+                        "running_tasks_count": cluster.get("runningTasksCount", 0),
+                        "active_services_count": cluster.get("activeServicesCount", 0),
+                        "discovery_sources": ["tagging_api", "describe_clusters"],
+                    },
+                )
+            )
+        return records
+
+    def _collect_eks(self, scan_run_id: str, account_id: str, region: str, tag_index: dict[str, dict[str, Any]]) -> list[ServiceRecord]:
+        client = self.session.client("eks", region_name=region)
+        cluster_names = client.list_clusters().get("clusters", [])
+        records: list[ServiceRecord] = []
+        for cluster_name in cluster_names:
+            cluster = client.describe_cluster(name=cluster_name)["cluster"]
+            arn = cluster["arn"]
+            records.append(
+                ServiceRecord(
+                    resource_id=arn,
+                    arn=arn,
+                    resource_type="AWS::EKS::Cluster",
+                    service_name="eks",
+                    region=region,
+                    account_id=account_id,
+                    tags=self._merged_tags(arn, tag_index, cluster.get("tags", {})),
+                    status=_status_from_state(cluster.get("status")),
+                    last_seen_at=datetime.now(UTC),
+                    scan_run_id=scan_run_id,
+                    metadata={
+                        "cluster_name": cluster.get("name"),
+                        "version": cluster.get("version"),
+                        "role_arn": cluster.get("roleArn"),
+                        "vpc_id": (cluster.get("resourcesVpcConfig") or {}).get("vpcId"),
+                        "security_groups": (cluster.get("resourcesVpcConfig") or {}).get("securityGroupIds", []),
+                        "subnet_ids": (cluster.get("resourcesVpcConfig") or {}).get("subnetIds", []),
+                        "discovery_sources": ["tagging_api", "describe_cluster"],
+                    },
+                )
+            )
+        return records
+
+    def _collect_elasticache(self, scan_run_id: str, account_id: str, region: str, tag_index: dict[str, dict[str, Any]]) -> list[ServiceRecord]:
+        client = self.session.client("elasticache", region_name=region)
+        paginator = client.get_paginator("describe_cache_clusters")
+        records: list[ServiceRecord] = []
+        for page in paginator.paginate(ShowCacheNodeInfo=False):
+            for cluster in page.get("CacheClusters", []):
+                arn = cluster.get("ARN") or f"arn:aws:elasticache:{region}:{account_id}:cluster:{cluster['CacheClusterId']}"
+                tags = _safe_call(lambda a=arn: _elasticache_tags(client, a), {})
+                records.append(
+                    ServiceRecord(
+                        resource_id=arn,
+                        arn=arn,
+                        resource_type="AWS::ElastiCache::CacheCluster",
+                        service_name="elasticache",
+                        region=region,
+                        account_id=account_id,
+                        tags=self._merged_tags(arn, tag_index, tags),
+                        status=_status_from_state(cluster.get("CacheClusterStatus")),
+                        last_seen_at=datetime.now(UTC),
+                        scan_run_id=scan_run_id,
+                        metadata={
+                            "cache_cluster_id": cluster.get("CacheClusterId"),
+                            "engine": cluster.get("Engine"),
+                            "cache_node_type": cluster.get("CacheNodeType"),
+                            "security_groups": [group.get("SecurityGroupId") for group in cluster.get("SecurityGroups", []) if group.get("SecurityGroupId")],
+                            "discovery_sources": ["tagging_api", "describe_cache_clusters"],
+                        },
+                    )
+                )
+        return records
+
+    def _collect_cloudfront(self, scan_run_id: str, account_id: str, tag_index: dict[str, dict[str, Any]]) -> list[ServiceRecord]:
+        client = self.session.client("cloudfront")
+        distributions = client.list_distributions().get("DistributionList", {}).get("Items", [])
+        records: list[ServiceRecord] = []
+        for distribution in distributions:
+            arn = f"arn:aws:cloudfront::{account_id}:distribution/{distribution['Id']}"
+            tags = _safe_call(lambda a=arn: _cloudfront_tags(client, a), {})
+            records.append(
+                ServiceRecord(
+                    resource_id=arn,
+                    arn=arn,
+                    resource_type="AWS::CloudFront::Distribution",
+                    service_name="cloudfront",
+                    region="global",
+                    account_id=account_id,
+                    tags=self._merged_tags(arn, tag_index, tags),
+                    status=_status_from_state("active" if distribution.get("Enabled") else "inactive"),
+                    last_seen_at=datetime.now(UTC),
+                    scan_run_id=scan_run_id,
+                    metadata={
+                        "distribution_id": distribution.get("Id"),
+                        "domain_name": distribution.get("DomainName"),
+                        "origins": [
+                            item.get("DomainName")
+                            for item in distribution.get("Origins", {}).get("Items", [])
+                            if item.get("DomainName")
+                        ],
+                        "aliases": distribution.get("Aliases", {}).get("Items", []),
+                        "discovery_sources": ["tagging_api", "list_distributions"],
+                    },
+                )
+            )
+        return records
+
     def _add_tagging_only_resources(
         self,
         scan_run_id: str,
@@ -726,6 +876,16 @@ def _sns_tags(client, arn: str) -> dict[str, str]:
     return {item["Key"]: item["Value"] for item in response.get("Tags", [])}
 
 
+def _elasticache_tags(client, arn: str) -> dict[str, str]:
+    response = client.list_tags_for_resource(ResourceName=arn)
+    return {item["Key"]: item["Value"] for item in response.get("TagList", [])}
+
+
+def _cloudfront_tags(client, arn: str) -> dict[str, str]:
+    response = client.list_tags_for_resource(Resource=arn)
+    return {item["Key"]: item["Value"] for item in response.get("Tags", {}).get("Items", [])}
+
+
 def _is_retryable(exc: ClientError) -> bool:
     code = exc.response.get("Error", {}).get("Code", "")
     return code in THROTTLE_CODES or code in TRANSIENT_CODES
@@ -750,6 +910,14 @@ def _resource_type_from_arn(arn: str) -> str:
         return "sns:topic"
     if service == "apigateway":
         return "apigateway:restapis"
+    if service == "ecs":
+        return "ecs:cluster"
+    if service == "eks":
+        return "eks:cluster"
+    if service == "elasticache":
+        return "elasticache:cluster"
+    if service == "cloudfront":
+        return "cloudfront:distribution"
     return service
 
 
@@ -771,6 +939,10 @@ def _service_name_from_arn(arn: str) -> str | None:
         "sqs": "sqs",
         "sns": "sns",
         "apigateway": "apigateway",
+        "ecs": "ecs",
+        "eks": "eks",
+        "elasticache": "elasticache",
+        "cloudfront": "cloudfront",
     }
     return mapping.get(service)
 
@@ -784,6 +956,10 @@ def _schema_type_from_tagging(resource_type: str | None, arn: str) -> str:
         "sqs:queue": "AWS::SQS::Queue",
         "sns:topic": "AWS::SNS::Topic",
         "apigateway:restapis": "AWS::ApiGateway::RestApi",
+        "ecs:cluster": "AWS::ECS::Cluster",
+        "eks:cluster": "AWS::EKS::Cluster",
+        "elasticache:cluster": "AWS::ElastiCache::CacheCluster",
+        "cloudfront:distribution": "AWS::CloudFront::Distribution",
     }
     if resource_type and resource_type in mapping:
         return mapping[resource_type]

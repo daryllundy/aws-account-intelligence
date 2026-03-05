@@ -38,11 +38,7 @@ class FakeTaggingClient:
         failure = self.failures.get((self.region_name, "tagging"))
         if failure:
             return FakePaginator([], failure=failure)
-        return FakePaginator([
-            {
-                "ResourceTagMappingList": _tagging_items_for_region(self.region_name),
-            }
-        ])
+        return FakePaginator([{"ResourceTagMappingList": _tagging_items_for_region(self.region_name)}])
 
 
 class FakeEc2Client:
@@ -66,7 +62,7 @@ class FakeEc2Client:
                     {
                         "Instances": [
                             {
-                                "InstanceId": f"i-{self.region_name or 'global'}",
+                                "InstanceId": f"i-{self.region_name}",
                                 "State": {"Name": "running"},
                                 "VpcId": "vpc-main",
                                 "SubnetId": "subnet-app",
@@ -165,13 +161,7 @@ class FakeSqsClient:
         return {"QueueUrls": [f"https://sqs.{self.region_name}.amazonaws.com/123456789012/orders-queue-{self.region_name}"]}
 
     def get_queue_attributes(self, QueueUrl, AttributeNames):
-        return {
-            "Attributes": {
-                "QueueArn": f"arn:aws:sqs:{self.region_name}:123456789012:orders-queue-{self.region_name}",
-                "Policy": "{}",
-                "RedrivePolicy": "{}",
-            }
-        }
+        return {"Attributes": {"QueueArn": f"arn:aws:sqs:{self.region_name}:123456789012:orders-queue-{self.region_name}", "Policy": "{}", "RedrivePolicy": "{}"}}
 
     def list_queue_tags(self, QueueUrl):
         return {"Tags": {"Environment": "runtime"}}
@@ -208,9 +198,52 @@ class FakeApiGatewayClient:
         return {"items": [{"id": "root", "resourceMethods": {"POST": {}}}]}
 
     def get_integration(self, restApiId, resourceId, httpMethod):
-        return {
-            "uri": f"arn:aws:apigateway:{self.region_name}:lambda:path/2015-03-31/functions/arn:aws:lambda:{self.region_name}:123456789012:function:process-orders-{self.region_name}/invocations"
-        }
+        return {"uri": f"arn:aws:apigateway:{self.region_name}:lambda:path/2015-03-31/functions/arn:aws:lambda:{self.region_name}:123456789012:function:process-orders-{self.region_name}/invocations"}
+
+
+class FakeEcsClient:
+    def __init__(self, region_name: str | None = None, counters=None, failures=None):
+        self.region_name = region_name
+
+    def list_clusters(self):
+        return {"clusterArns": [f"arn:aws:ecs:{self.region_name}:123456789012:cluster/orders-{self.region_name}"]}
+
+    def describe_clusters(self, clusters, include):
+        return {"clusters": [{"clusterArn": f"arn:aws:ecs:{self.region_name}:123456789012:cluster/orders-{self.region_name}", "clusterName": f"orders-{self.region_name}", "registeredContainerInstancesCount": 2, "runningTasksCount": 3, "activeServicesCount": 1, "tags": [{"Key": "Environment", "Value": "runtime"}]}]}
+
+
+class FakeEksClient:
+    def __init__(self, region_name: str | None = None, counters=None, failures=None):
+        self.region_name = region_name
+
+    def list_clusters(self):
+        return {"clusters": [f"orders-{self.region_name}"]}
+
+    def describe_cluster(self, name):
+        return {"cluster": {"arn": f"arn:aws:eks:{self.region_name}:123456789012:cluster/{name}", "name": name, "version": "1.31", "roleArn": "arn:aws:iam::123456789012:role/eks-cluster", "status": "ACTIVE", "tags": {"Environment": "runtime"}, "resourcesVpcConfig": {"vpcId": "vpc-main", "securityGroupIds": ["sg-eks"], "subnetIds": ["subnet-app", "subnet-data"]}}}
+
+
+class FakeElastiCacheClient:
+    def __init__(self, region_name: str | None = None, counters=None, failures=None):
+        self.region_name = region_name
+
+    def get_paginator(self, name):
+        assert name == "describe_cache_clusters"
+        return FakePaginator([{"CacheClusters": [{"ARN": f"arn:aws:elasticache:{self.region_name}:123456789012:cluster:orders-cache-{self.region_name}", "CacheClusterId": f"orders-cache-{self.region_name}", "CacheClusterStatus": "available", "Engine": "redis", "CacheNodeType": "cache.t4g.small", "SecurityGroups": [{"SecurityGroupId": "sg-cache"}]}]}])
+
+    def list_tags_for_resource(self, ResourceName):
+        return {"TagList": [{"Key": "Environment", "Value": "runtime"}]}
+
+
+class FakeCloudFrontClient:
+    def __init__(self, region_name: str | None = None, counters=None, failures=None):
+        pass
+
+    def list_distributions(self):
+        return {"DistributionList": {"Items": [{"Id": "DIST123", "DomainName": "d111111abcdef8.cloudfront.net", "Enabled": True, "Origins": {"Items": [{"DomainName": "orders-artifacts.s3.amazonaws.com"}]}, "Aliases": {"Items": ["cdn.example.com"]}}]}}
+
+    def list_tags_for_resource(self, Resource):
+        return {"Tags": {"Items": [{"Key": "Environment", "Value": "runtime"}]}}
 
 
 class FakeCeClient:
@@ -258,6 +291,10 @@ class FakeSession:
             "sqs": FakeSqsClient,
             "sns": FakeSnsClient,
             "apigateway": FakeApiGatewayClient,
+            "ecs": FakeEcsClient,
+            "eks": FakeEksClient,
+            "elasticache": FakeElastiCacheClient,
+            "cloudfront": FakeCloudFrontClient,
             "ce": FakeCeClient,
         }
         return mapping[service_name](region_name=region_name, counters=self.counters, failures=self.failures)
@@ -270,7 +307,7 @@ def test_aws_collector_uses_tagging_as_primary_inventory_source() -> None:
     bundle = collector.load("scan-aws-1")
 
     service_names = {service.service_name for service in bundle.services}
-    assert service_names == {"ec2", "rds", "lambda", "s3", "sqs", "sns", "apigateway"}
+    assert service_names == {"ec2", "rds", "lambda", "s3", "sqs", "sns", "apigateway", "ecs", "eks", "elasticache", "cloudfront"}
 
     ec2_service = next(service for service in bundle.services if service.service_name == "ec2")
     assert ec2_service.tags["Environment"] == "tagging"
@@ -285,6 +322,11 @@ def test_aws_collector_uses_tagging_as_primary_inventory_source() -> None:
 
     api_service = next(service for service in bundle.services if service.service_name == "apigateway")
     assert api_service.metadata["integrations"] == ["arn:aws:lambda:us-west-2:123456789012:function:process-orders-us-west-2"]
+
+    assert any(service.service_name == "ecs" for service in bundle.services)
+    assert any(service.service_name == "eks" for service in bundle.services)
+    assert any(service.service_name == "elasticache" for service in bundle.services)
+    assert any(service.service_name == "cloudfront" for service in bundle.services)
 
     unattributed = next(cost for cost in bundle.costs if cost.resource_id == "unattributed")
     assert unattributed.mtd_cost_usd == 1.2
@@ -337,52 +379,22 @@ def test_aws_collector_surfaces_partial_region_failure_as_warning() -> None:
 
 
 def _tagging_items_for_region(region: str | None):
-    if region == "us-east-1":
-        return []
     if region == "us-west-2":
         return [
-            {
-                "ResourceARN": "arn:aws:ec2:us-west-2:123456789012:instance/i-us-west-2",
-                "ResourceType": "ec2:instance",
-                "Tags": [{"Key": "Environment", "Value": "tagging"}, {"Key": "Owner", "Value": "platform"}],
-            },
-            {
-                "ResourceARN": "arn:aws:rds:us-west-2:123456789012:db:orders-db-us-west-2",
-                "ResourceType": "rds:db",
-                "Tags": [{"Key": "Environment", "Value": "tagging"}],
-            },
-            {
-                "ResourceARN": "arn:aws:lambda:us-west-2:123456789012:function:process-orders-us-west-2",
-                "ResourceType": "lambda:function",
-                "Tags": [{"Key": "Environment", "Value": "tagging"}],
-            },
-            {
-                "ResourceARN": "arn:aws:sqs:us-west-2:123456789012:orders-queue-us-west-2",
-                "ResourceType": "sqs:queue",
-                "Tags": [{"Key": "Environment", "Value": "tagging"}],
-            },
-            {
-                "ResourceARN": "arn:aws:sns:us-west-2:123456789012:orders-topic-us-west-2",
-                "ResourceType": "sns:topic",
-                "Tags": [{"Key": "Environment", "Value": "tagging"}],
-            },
-            {
-                "ResourceARN": "arn:aws:apigateway:us-west-2::/restapis/orders-api-us-west-2",
-                "ResourceType": "apigateway:restapis",
-                "Tags": [{"Key": "Environment", "Value": "tagging"}],
-            },
-            {
-                "ResourceARN": "arn:aws:sqs:us-west-2:123456789012:orders-queue-shadow-us-west-2",
-                "ResourceType": "sqs:queue",
-                "Tags": [{"Key": "Environment", "Value": "tagging"}, {"Key": "Shadow", "Value": "true"}],
-            },
+            {"ResourceARN": "arn:aws:ec2:us-west-2:123456789012:instance/i-us-west-2", "ResourceType": "ec2:instance", "Tags": [{"Key": "Environment", "Value": "tagging"}, {"Key": "Owner", "Value": "platform"}]},
+            {"ResourceARN": "arn:aws:rds:us-west-2:123456789012:db:orders-db-us-west-2", "ResourceType": "rds:db", "Tags": [{"Key": "Environment", "Value": "tagging"}]},
+            {"ResourceARN": "arn:aws:lambda:us-west-2:123456789012:function:process-orders-us-west-2", "ResourceType": "lambda:function", "Tags": [{"Key": "Environment", "Value": "tagging"}]},
+            {"ResourceARN": "arn:aws:sqs:us-west-2:123456789012:orders-queue-us-west-2", "ResourceType": "sqs:queue", "Tags": [{"Key": "Environment", "Value": "tagging"}]},
+            {"ResourceARN": "arn:aws:sns:us-west-2:123456789012:orders-topic-us-west-2", "ResourceType": "sns:topic", "Tags": [{"Key": "Environment", "Value": "tagging"}]},
+            {"ResourceARN": "arn:aws:apigateway:us-west-2::/restapis/orders-api-us-west-2", "ResourceType": "apigateway:restapis", "Tags": [{"Key": "Environment", "Value": "tagging"}]},
+            {"ResourceARN": "arn:aws:ecs:us-west-2:123456789012:cluster/orders-us-west-2", "ResourceType": "ecs:cluster", "Tags": [{"Key": "Environment", "Value": "tagging"}]},
+            {"ResourceARN": "arn:aws:eks:us-west-2:123456789012:cluster/orders-us-west-2", "ResourceType": "eks:cluster", "Tags": [{"Key": "Environment", "Value": "tagging"}]},
+            {"ResourceARN": "arn:aws:elasticache:us-west-2:123456789012:cluster:orders-cache-us-west-2", "ResourceType": "elasticache:cluster", "Tags": [{"Key": "Environment", "Value": "tagging"}]},
+            {"ResourceARN": "arn:aws:sqs:us-west-2:123456789012:orders-queue-shadow-us-west-2", "ResourceType": "sqs:queue", "Tags": [{"Key": "Environment", "Value": "tagging"}, {"Key": "Shadow", "Value": "true"}]},
         ]
     return [
-        {
-            "ResourceARN": "arn:aws:s3:::orders-artifacts",
-            "ResourceType": "s3:bucket",
-            "Tags": [{"Key": "Environment", "Value": "tagging"}],
-        }
+        {"ResourceARN": "arn:aws:s3:::orders-artifacts", "ResourceType": "s3:bucket", "Tags": [{"Key": "Environment", "Value": "tagging"}]},
+        {"ResourceARN": "arn:aws:cloudfront::123456789012:distribution/DIST123", "ResourceType": "cloudfront:distribution", "Tags": [{"Key": "Environment", "Value": "tagging"}]},
     ]
 
 
