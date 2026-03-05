@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from typer.testing import CliRunner
 
@@ -100,3 +101,41 @@ def test_cli_scan_delta() -> None:
     assert delta_result.exit_code == 0, delta_result.stdout
     delta_payload = json.loads(delta_result.stdout)
     assert delta_payload["scan_run_id"] == scan_payload["scan_run_id"]
+
+
+def test_cli_report_export_formats(tmp_path: Path) -> None:
+    scan_result = runner.invoke(app, ["scan", "run", "--output", "json"])
+    assert scan_result.exit_code == 0, scan_result.stdout
+    scan_payload = json.loads(scan_result.stdout)
+
+    targets = {
+        "json": tmp_path / "report.json",
+        "csv": tmp_path / "report.csv",
+        "pdf": tmp_path / "report.pdf",
+        "slack": tmp_path / "report-slack.txt",
+        "email": tmp_path / "report-email.txt",
+    }
+
+    for format_name, target in targets.items():
+        result = runner.invoke(
+            app,
+            [
+                "report",
+                "export",
+                "--scan-run-id",
+                scan_payload["scan_run_id"],
+                "--format",
+                format_name,
+                "--destination",
+                str(target),
+            ],
+        )
+        assert result.exit_code == 0, result.stdout
+        assert target.exists()
+        assert target.stat().st_size > 0
+
+    assert json.loads(targets["json"].read_text())["scan"]["scan_run_id"] == scan_payload["scan_run_id"]
+    assert "resource_id" in targets["csv"].read_text()
+    assert targets["pdf"].read_bytes().startswith(b"%PDF")
+    assert "AWS Account Intelligence" in targets["slack"].read_text()
+    assert "Subject: AWS Account Intelligence Snapshot" in targets["email"].read_text()

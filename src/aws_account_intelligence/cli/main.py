@@ -16,6 +16,7 @@ from aws_account_intelligence.config import get_settings
 from aws_account_intelligence.iam_validation import IamValidator
 from aws_account_intelligence.models import IamValidationResult
 from aws_account_intelligence.pipeline import ScanPipeline
+from aws_account_intelligence.reporting import ReportExporter
 from aws_account_intelligence.storage import Database
 from aws_account_intelligence.web.dashboard import render_dashboard_html
 
@@ -28,6 +29,7 @@ impact_app = typer.Typer()
 iam_app = typer.Typer()
 api_app = typer.Typer()
 schedule_app = typer.Typer()
+report_app = typer.Typer()
 
 app.add_typer(scan_app, name="scan")
 app.add_typer(inventory_app, name="inventory")
@@ -37,6 +39,7 @@ app.add_typer(impact_app, name="impact")
 app.add_typer(iam_app, name="iam")
 app.add_typer(api_app, name="api")
 app.add_typer(schedule_app, name="schedule")
+app.add_typer(report_app, name="report")
 
 
 @app.callback()
@@ -215,6 +218,21 @@ def schedule_run_due(output: str = "json") -> None:
     _, pipeline = _services()
     result = pipeline.run_due_schedules()
     _emit(result, output)
+
+
+@report_app.command("export")
+def report_export(
+    format_name: Annotated[str, typer.Option("--format", help="json, csv, pdf, slack, or email")],
+    scan_run_id: str | None = None,
+    latest: bool = True,
+    destination: Path | None = None,
+) -> None:
+    database, pipeline = _services()
+    settings = get_settings()
+    resolved = _resolve_scan_id(database, scan_run_id, latest)
+    exporter = ReportExporter(database=database, pipeline=pipeline, output_dir=settings.output_dir)
+    target = exporter.export(resolved, format_name=format_name, destination=destination)
+    typer.echo(str(target))
 
 
 @api_app.command("serve")
