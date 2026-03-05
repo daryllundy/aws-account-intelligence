@@ -51,4 +51,4 @@ class FixtureCollector:
                     confidence=float(entry["confidence"]),
                 )
             )
-        return DiscoveryBundle(services=services, costs=costs)
+        return DiscoveryBundle(services=services, costs=costs, warnings=[])

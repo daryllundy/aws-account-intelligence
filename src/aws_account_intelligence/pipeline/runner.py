@@ -41,6 +41,17 @@ class ScanPipeline:
         scan_run.summary = {
             "services_by_type": _count_by(bundle.services, key=lambda item: item.service_name),
             "cost_total_mtd_usd": round(sum(cost.mtd_cost_usd for cost in bundle.costs), 2),
+            "warnings": [
+                {
+                    "stage": warning.stage,
+                    "service": warning.service,
+                    "region": warning.region,
+                    "code": warning.code,
+                    "message": warning.message,
+                }
+                for warning in bundle.warnings
+            ],
+            "warning_count": len(bundle.warnings),
         }
         self.database.upsert_scan_run(scan_run)
         return scan_run

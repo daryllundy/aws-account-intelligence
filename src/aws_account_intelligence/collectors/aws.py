@@ -40,7 +40,7 @@ class AwsCollector:
             raise CollectorError(f"AWS collection failed: {message}") from exc
         except Exception as exc:  # pragma: no cover - defensive wrapper around boto errors
             raise CollectorError(f"AWS collection failed: {exc}") from exc
-        return DiscoveryBundle(services=services, costs=costs)
+        return DiscoveryBundle(services=services, costs=costs, warnings=[])
 
     def _discover_services(self, scan_run_id: str) -> list[ServiceRecord]:
         account_id = self._get_account_id()
