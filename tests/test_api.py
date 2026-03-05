@@ -86,3 +86,16 @@ def test_api_returns_404_for_unknown_scan_or_resource() -> None:
     scan_run_id = _seed_scan()
     impact_response = client.get("/impact", params={"scan_run_id": scan_run_id, "resource": "missing"})
     assert impact_response.status_code == 404
+
+
+def test_dashboard_route_serves_mvp_ui() -> None:
+    _seed_scan()
+    client = TestClient(create_api_app())
+
+    response = client.get("/dashboard")
+
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert "Filterable Resource Ledger" in response.text
+    assert "Shutdown Consequences" in response.text
+    assert "loadDashboard" in response.text

@@ -7,6 +7,7 @@ from typing import Annotated
 
 import typer
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import HTMLResponse
 from fastapi.responses import JSONResponse
 
 from aws_account_intelligence.analysis.dependency_graph import DependencyGraphBuilder
@@ -16,6 +17,7 @@ from aws_account_intelligence.iam_validation import IamValidator
 from aws_account_intelligence.models import IamValidationResult
 from aws_account_intelligence.pipeline import ScanPipeline
 from aws_account_intelligence.storage import Database
+from aws_account_intelligence.web.dashboard import render_dashboard_html
 
 app = typer.Typer(help="AWS Account Intelligence CLI")
 scan_app = typer.Typer()
@@ -197,6 +199,11 @@ def create_api_app() -> FastAPI:
     @api.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @api.get("/", response_class=HTMLResponse)
+    @api.get("/dashboard", response_class=HTMLResponse)
+    def dashboard() -> HTMLResponse:
+        return HTMLResponse(render_dashboard_html())
 
     @api.get("/scans")
     def list_scans(limit: int = Query(default=20, ge=1, le=100)) -> JSONResponse:
