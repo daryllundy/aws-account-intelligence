@@ -98,6 +98,10 @@ class DependentNode(BaseModel):
     edge_type: EdgeType | None = None
     confidence: float | None = None
     rationale: str | None = None
+    path_depth: int = 1
+    dependency_path: list[str] = Field(default_factory=list)
+    is_critical: bool = False
+    criticality_reasons: list[str] = Field(default_factory=list)
 
 
 class ImpactReport(BaseModel):
@@ -108,6 +112,7 @@ class ImpactReport(BaseModel):
     estimated_monthly_savings_usd: float
     risk_score: RiskLevel
     rationale: str
+    risk_factors: list[str] = Field(default_factory=list)
     generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
