@@ -36,6 +36,11 @@ class RiskLevel(str, Enum):
     CRITICAL = "CRITICAL"
 
 
+class ScheduleStatus(str, Enum):
+    ACTIVE = "ACTIVE"
+    PAUSED = "PAUSED"
+
+
 class ServiceRecord(BaseModel):
     resource_id: str
     arn: str
@@ -133,6 +138,35 @@ class CostSummaryResponse(BaseModel):
 class GraphExportResponse(BaseModel):
     scan: ScanRun
     adjacency: dict[str, list[DependencyEdge]]
+
+
+class ScanDeltaChange(BaseModel):
+    resource_id: str
+    service_name: str
+    change_type: Literal["ADDED", "REMOVED", "COST_CHANGED"]
+    prior_value: float | None = None
+    current_value: float | None = None
+    summary: str
+
+
+class ScanDeltaReport(BaseModel):
+    scan_run_id: str
+    baseline_scan_run_id: str | None = None
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    added_resources: list[ScanDeltaChange] = Field(default_factory=list)
+    removed_resources: list[ScanDeltaChange] = Field(default_factory=list)
+    cost_changes: list[ScanDeltaChange] = Field(default_factory=list)
+
+
+class ScanSchedule(BaseModel):
+    schedule_id: str
+    name: str
+    interval_hours: int
+    status: ScheduleStatus = ScheduleStatus.ACTIVE
+    next_run_at: datetime
+    last_run_at: datetime | None = None
+    regions: list[str] = Field(default_factory=list)
+    data_source: str
 
 
 class IamValidationResult(BaseModel):

@@ -99,3 +99,15 @@ def test_dashboard_route_serves_mvp_ui() -> None:
     assert "Filterable Resource Ledger" in response.text
     assert "Shutdown Consequences" in response.text
     assert "loadDashboard" in response.text
+
+
+def test_api_exposes_delta_endpoint() -> None:
+    scan_run_id = _seed_scan()
+    client = TestClient(create_api_app())
+
+    response = client.get(f"/scans/{scan_run_id}/delta")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["scan_run_id"] == scan_run_id
+    assert "added_resources" in payload

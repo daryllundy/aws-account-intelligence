@@ -12,7 +12,11 @@ from aws_account_intelligence.models.schemas import (
     InventoryListResponse,
     ResourceStatus,
     RiskLevel,
+    ScanDeltaChange,
+    ScanDeltaReport,
     ScanRun,
+    ScanSchedule,
+    ScheduleStatus,
     ServiceRecord,
 )
 
@@ -30,6 +34,10 @@ __all__ = [
     "InventoryListResponse",
     "ResourceStatus",
     "RiskLevel",
+    "ScanDeltaChange",
+    "ScanDeltaReport",
     "ScanRun",
+    "ScanSchedule",
+    "ScheduleStatus",
     "ServiceRecord",
 ]

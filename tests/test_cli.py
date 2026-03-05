@@ -77,3 +77,26 @@ def test_cli_scan_status_includes_warning_summary(monkeypatch) -> None:
 
     assert status_payload["summary"]["warning_count"] == 1
     assert status_payload["summary"]["warnings"][0]["service"] == "rds"
+
+
+def test_cli_schedule_create_list_run_due() -> None:
+    create_result = runner.invoke(app, ["schedule", "create", "nightly", "--interval-hours", "1", "--output", "json"])
+    assert create_result.exit_code == 0, create_result.stdout
+    schedule_payload = json.loads(create_result.stdout)
+    assert schedule_payload["name"] == "nightly"
+
+    list_result = runner.invoke(app, ["schedule", "list", "--output", "json"])
+    assert list_result.exit_code == 0, list_result.stdout
+    list_payload = json.loads(list_result.stdout)
+    assert any(item["name"] == "nightly" for item in list_payload)
+
+
+def test_cli_scan_delta() -> None:
+    scan_result = runner.invoke(app, ["scan", "run", "--output", "json"])
+    assert scan_result.exit_code == 0, scan_result.stdout
+    scan_payload = json.loads(scan_result.stdout)
+
+    delta_result = runner.invoke(app, ["scan", "delta", "--scan-run-id", scan_payload["scan_run_id"], "--output", "json"])
+    assert delta_result.exit_code == 0, delta_result.stdout
+    delta_payload = json.loads(delta_result.stdout)
+    assert delta_payload["scan_run_id"] == scan_payload["scan_run_id"]

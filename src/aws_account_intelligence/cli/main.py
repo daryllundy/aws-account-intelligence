@@ -27,6 +27,7 @@ graph_app = typer.Typer()
 impact_app = typer.Typer()
 iam_app = typer.Typer()
 api_app = typer.Typer()
+schedule_app = typer.Typer()
 
 app.add_typer(scan_app, name="scan")
 app.add_typer(inventory_app, name="inventory")
@@ -35,6 +36,7 @@ app.add_typer(graph_app, name="graph")
 app.add_typer(impact_app, name="impact")
 app.add_typer(iam_app, name="iam")
 app.add_typer(api_app, name="api")
+app.add_typer(schedule_app, name="schedule")
 
 
 @app.callback()
@@ -180,10 +182,39 @@ def impact_analyze(
     _emit(report.model_dump(mode="json"), output)
 
 
+@scan_app.command("delta")
+def scan_delta(scan_run_id: str | None = None, latest: bool = True, output: str = "json") -> None:
+    database, pipeline = _services()
+    resolved = _resolve_scan_id(database, scan_run_id, latest)
+    report = pipeline.delta(resolved)
+    _emit(report.model_dump(mode="json"), output)
+
+
 @iam_app.command("validate")
 def iam_validate(output: str = "json") -> None:
     result: IamValidationResult = IamValidator().validate()
     _emit(result.model_dump(mode="json"), output)
+
+
+@schedule_app.command("create")
+def schedule_create(name: str, interval_hours: int = 24, output: str = "json") -> None:
+    _, pipeline = _services()
+    schedule = pipeline.create_schedule(name=name, interval_hours=interval_hours)
+    _emit(schedule.model_dump(mode="json"), output)
+
+
+@schedule_app.command("list")
+def schedule_list(output: str = "json") -> None:
+    _, pipeline = _services()
+    schedules = [schedule.model_dump(mode="json") for schedule in pipeline.list_schedules()]
+    _emit(schedules, output)
+
+
+@schedule_app.command("run-due")
+def schedule_run_due(output: str = "json") -> None:
+    _, pipeline = _services()
+    result = pipeline.run_due_schedules()
+    _emit(result, output)
 
 
 @api_app.command("serve")
@@ -266,6 +297,14 @@ def create_api_app() -> FastAPI:
         response = pipeline.costs(resolved)
         return JSONResponse(response.model_dump(mode="json"))
 
+    @api.get("/scans/{scan_run_id}/delta")
+    def api_scan_delta(scan_run_id: str) -> JSONResponse:
+        database, pipeline = _services()
+        if database.get_scan_run(scan_run_id) is None:
+            raise HTTPException(status_code=404, detail=f"Unknown scan run: {scan_run_id}")
+        response = pipeline.delta(scan_run_id)
+        return JSONResponse(response.model_dump(mode="json"))
+
     @api.get("/graph")
     def graph_export_api(
         scan_run_id: str | None = None,
@@ -301,6 +340,11 @@ def create_api_app() -> FastAPI:
         edges = database.list_dependency_edges(resolved)
         report = ImpactAnalyzer().analyze(resolved, resource, services, costs, edges)
         return JSONResponse(report.model_dump(mode="json"))
+
+    @api.get("/schedules")
+    def schedules() -> JSONResponse:
+        _, pipeline = _services()
+        return JSONResponse([schedule.model_dump(mode="json") for schedule in pipeline.list_schedules()])
 
     return api
 

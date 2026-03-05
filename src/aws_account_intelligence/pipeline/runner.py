@@ -1,12 +1,20 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from aws_account_intelligence.analysis.dependency_graph import DependencyGraphBuilder
 from aws_account_intelligence.collectors.factory import get_collector
 from aws_account_intelligence.config import Settings
-from aws_account_intelligence.models import CostSummaryResponse, InventoryListResponse, ScanRun
+from aws_account_intelligence.models import (
+    CostSummaryResponse,
+    InventoryListResponse,
+    ScanDeltaChange,
+    ScanDeltaReport,
+    ScanRun,
+    ScanSchedule,
+    ScheduleStatus,
+)
 from aws_account_intelligence.storage import Database
 
 
@@ -25,6 +33,7 @@ class ScanPipeline:
             regions=self.settings.region_list,
         )
         self.database.upsert_scan_run(scan_run)
+        baseline_scan = self.database.get_latest_completed_scan_run(exclude_scan_run_id=scan_run.scan_run_id)
 
         collector = get_collector(self.settings.data_source)
         bundle = collector.load(scan_run.scan_run_id)
@@ -33,6 +42,8 @@ class ScanPipeline:
         self.database.save_service_records(bundle.services)
         self.database.save_cost_attributions(bundle.costs)
         self.database.save_dependency_edges(edges)
+        delta_report = self._build_delta_report(scan_run.scan_run_id, bundle.services, bundle.costs, baseline_scan)
+        self.database.save_delta_report(delta_report)
 
         scan_run.completed_at = datetime.now(UTC)
         scan_run.status = "completed"
@@ -52,6 +63,12 @@ class ScanPipeline:
                 for warning in bundle.warnings
             ],
             "warning_count": len(bundle.warnings),
+            "delta": {
+                "baseline_scan_run_id": delta_report.baseline_scan_run_id,
+                "added": len(delta_report.added_resources),
+                "removed": len(delta_report.removed_resources),
+                "cost_changed": len(delta_report.cost_changes),
+            },
         }
         self.database.upsert_scan_run(scan_run)
         return scan_run
@@ -78,6 +95,114 @@ class ScanPipeline:
         if scan is None:
             raise ValueError(f"Unknown scan run: {scan_run_id}")
         return scan
+
+    def delta(self, scan_run_id: str) -> ScanDeltaReport:
+        report = self.database.get_delta_report(scan_run_id)
+        if report is None:
+            raise ValueError(f"No delta report found for scan: {scan_run_id}")
+        return report
+
+    def create_schedule(self, name: str, interval_hours: int) -> ScanSchedule:
+        now = datetime.now(UTC)
+        schedule = ScanSchedule(
+            schedule_id=str(uuid4()),
+            name=name,
+            interval_hours=interval_hours,
+            status=ScheduleStatus.ACTIVE,
+            next_run_at=now + timedelta(hours=interval_hours),
+            last_run_at=None,
+            regions=self.settings.region_list,
+            data_source=self.settings.data_source,
+        )
+        self.database.save_schedule(schedule)
+        return schedule
+
+    def list_schedules(self) -> list[ScanSchedule]:
+        return self.database.list_schedules()
+
+    def run_due_schedules(self, now: datetime | None = None) -> list[dict[str, str]]:
+        current = now or datetime.now(UTC)
+        results: list[dict[str, str]] = []
+        for schedule in self.database.get_due_schedules(current):
+            scan = self.run()
+            next_run_at = current + timedelta(hours=schedule.interval_hours)
+            updated = schedule.model_copy(update={"last_run_at": current, "next_run_at": next_run_at})
+            self.database.save_schedule(updated)
+            results.append(
+                {
+                    "schedule_id": schedule.schedule_id,
+                    "name": schedule.name,
+                    "scan_run_id": scan.scan_run_id,
+                }
+            )
+        return results
+
+    def _build_delta_report(
+        self,
+        scan_run_id: str,
+        services,
+        costs,
+        baseline_scan: ScanRun | None,
+    ) -> ScanDeltaReport:
+        if baseline_scan is None:
+            return ScanDeltaReport(scan_run_id=scan_run_id, baseline_scan_run_id=None)
+
+        current_services = {service.resource_id: service for service in services}
+        current_costs = {cost.resource_id: cost.projected_monthly_cost_usd for cost in costs}
+        prior_services = {service.resource_id: service for service in self.database.list_service_records(baseline_scan.scan_run_id)}
+        prior_costs = {
+            cost.resource_id: cost.projected_monthly_cost_usd
+            for cost in self.database.list_cost_attributions(baseline_scan.scan_run_id)
+        }
+
+        added = [
+            ScanDeltaChange(
+                resource_id=service.resource_id,
+                service_name=service.service_name,
+                change_type="ADDED",
+                current_value=current_costs.get(service.resource_id),
+                summary=f"{service.service_name} resource was added since the previous scan.",
+            )
+            for resource_id, service in current_services.items()
+            if resource_id not in prior_services
+        ]
+        removed = [
+            ScanDeltaChange(
+                resource_id=service.resource_id,
+                service_name=service.service_name,
+                change_type="REMOVED",
+                prior_value=prior_costs.get(service.resource_id),
+                summary=f"{service.service_name} resource is no longer present in the latest scan.",
+            )
+            for resource_id, service in prior_services.items()
+            if resource_id not in current_services
+        ]
+        cost_changes = []
+        for resource_id, service in current_services.items():
+            if resource_id not in prior_costs or resource_id not in current_costs:
+                continue
+            prior_value = round(prior_costs[resource_id], 2)
+            current_value = round(current_costs[resource_id], 2)
+            if abs(current_value - prior_value) < 0.01:
+                continue
+            cost_changes.append(
+                ScanDeltaChange(
+                    resource_id=resource_id,
+                    service_name=service.service_name,
+                    change_type="COST_CHANGED",
+                    prior_value=prior_value,
+                    current_value=current_value,
+                    summary=f"Projected monthly cost changed by {round(current_value - prior_value, 2):.2f} USD.",
+                )
+            )
+
+        return ScanDeltaReport(
+            scan_run_id=scan_run_id,
+            baseline_scan_run_id=baseline_scan.scan_run_id,
+            added_resources=sorted(added, key=lambda item: item.resource_id),
+            removed_resources=sorted(removed, key=lambda item: item.resource_id),
+            cost_changes=sorted(cost_changes, key=lambda item: item.resource_id),
+        )
 
 
 def _count_by(items: list, key):

@@ -8,7 +8,16 @@ from typing import Iterator
 from sqlalchemy import JSON, DateTime, Float, Integer, String, Text, create_engine, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
-from aws_account_intelligence.models import CostAttribution, CostPoint, DependencyEdge, ScanRun, ServiceRecord
+from aws_account_intelligence.models import (
+    CostAttribution,
+    CostPoint,
+    DependencyEdge,
+    ScanDeltaChange,
+    ScanDeltaReport,
+    ScanRun,
+    ScanSchedule,
+    ServiceRecord,
+)
 
 
 class Base(DeclarativeBase):
@@ -75,6 +84,30 @@ class DependencyEdgeRow(Base):
     confidence: Mapped[float] = mapped_column(Float)
     rationale: Mapped[str] = mapped_column(Text)
     resource_metadata: Mapped[dict] = mapped_column("metadata", JSON, default=dict)
+
+
+class ScanDeltaReportRow(Base):
+    __tablename__ = "scan_delta_reports"
+
+    scan_run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    baseline_scan_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    added_resources: Mapped[list] = mapped_column(JSON, default=list)
+    removed_resources: Mapped[list] = mapped_column(JSON, default=list)
+    cost_changes: Mapped[list] = mapped_column(JSON, default=list)
+
+
+class ScanScheduleRow(Base):
+    __tablename__ = "scan_schedules"
+
+    schedule_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    interval_hours: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(16))
+    next_run_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    regions_json: Mapped[str] = mapped_column(Text)
+    data_source: Mapped[str] = mapped_column(String(32))
 
 
 class Database:
@@ -186,6 +219,16 @@ class Database:
             rows = session.scalars(select(ScanRunRow).order_by(ScanRunRow.started_at.desc()).limit(limit)).all()
             return [_scan_run_from_row(row) for row in rows]
 
+    def get_latest_completed_scan_run(self, exclude_scan_run_id: str | None = None) -> ScanRun | None:
+        with self.session() as session:
+            query = select(ScanRunRow).where(ScanRunRow.status == "completed").order_by(ScanRunRow.started_at.desc())
+            rows = session.scalars(query).all()
+            for row in rows:
+                if exclude_scan_run_id and row.scan_run_id == exclude_scan_run_id:
+                    continue
+                return _scan_run_from_row(row)
+            return None
+
     def list_service_records(self, scan_run_id: str) -> list[ServiceRecord]:
         with self.session() as session:
             rows = session.scalars(select(ServiceRecordRow).where(ServiceRecordRow.scan_run_id == scan_run_id)).all()
@@ -200,6 +243,62 @@ class Database:
         with self.session() as session:
             rows = session.scalars(select(DependencyEdgeRow).where(DependencyEdgeRow.scan_run_id == scan_run_id)).all()
             return [_edge_from_row(row) for row in rows]
+
+    def save_delta_report(self, report: ScanDeltaReport) -> None:
+        with self.session() as session:
+            row = session.get(ScanDeltaReportRow, report.scan_run_id)
+            payload = {
+                "scan_run_id": report.scan_run_id,
+                "baseline_scan_run_id": report.baseline_scan_run_id,
+                "generated_at": report.generated_at,
+                "added_resources": [item.model_dump(mode="json") for item in report.added_resources],
+                "removed_resources": [item.model_dump(mode="json") for item in report.removed_resources],
+                "cost_changes": [item.model_dump(mode="json") for item in report.cost_changes],
+            }
+            if row is None:
+                session.add(ScanDeltaReportRow(**payload))
+            else:
+                for key, value in payload.items():
+                    setattr(row, key, value)
+
+    def get_delta_report(self, scan_run_id: str) -> ScanDeltaReport | None:
+        with self.session() as session:
+            row = session.get(ScanDeltaReportRow, scan_run_id)
+            return _delta_report_from_row(row) if row else None
+
+    def save_schedule(self, schedule: ScanSchedule) -> None:
+        with self.session() as session:
+            row = session.get(ScanScheduleRow, schedule.schedule_id)
+            payload = {
+                "schedule_id": schedule.schedule_id,
+                "name": schedule.name,
+                "interval_hours": schedule.interval_hours,
+                "status": schedule.status.value,
+                "next_run_at": schedule.next_run_at,
+                "last_run_at": schedule.last_run_at,
+                "regions_json": json.dumps(schedule.regions),
+                "data_source": schedule.data_source,
+            }
+            if row is None:
+                session.add(ScanScheduleRow(**payload))
+            else:
+                for key, value in payload.items():
+                    setattr(row, key, value)
+
+    def list_schedules(self) -> list[ScanSchedule]:
+        with self.session() as session:
+            rows = session.scalars(select(ScanScheduleRow).order_by(ScanScheduleRow.next_run_at.asc())).all()
+            return [_schedule_from_row(row) for row in rows]
+
+    def get_due_schedules(self, now: datetime) -> list[ScanSchedule]:
+        with self.session() as session:
+            rows = session.scalars(
+                select(ScanScheduleRow)
+                .where(ScanScheduleRow.status == "ACTIVE")
+                .where(ScanScheduleRow.next_run_at <= now)
+                .order_by(ScanScheduleRow.next_run_at.asc())
+            ).all()
+            return [_schedule_from_row(row) for row in rows]
 
 
 def _scan_run_from_row(row: ScanRunRow) -> ScanRun:
@@ -258,6 +357,30 @@ def _edge_from_row(row: DependencyEdgeRow) -> DependencyEdge:
         confidence=row.confidence,
         rationale=row.rationale,
         metadata=row.resource_metadata or {},
+    )
+
+
+def _delta_report_from_row(row: ScanDeltaReportRow) -> ScanDeltaReport:
+    return ScanDeltaReport(
+        scan_run_id=row.scan_run_id,
+        baseline_scan_run_id=row.baseline_scan_run_id,
+        generated_at=_ensure_utc(row.generated_at),
+        added_resources=[ScanDeltaChange.model_validate(item) for item in row.added_resources or []],
+        removed_resources=[ScanDeltaChange.model_validate(item) for item in row.removed_resources or []],
+        cost_changes=[ScanDeltaChange.model_validate(item) for item in row.cost_changes or []],
+    )
+
+
+def _schedule_from_row(row: ScanScheduleRow) -> ScanSchedule:
+    return ScanSchedule(
+        schedule_id=row.schedule_id,
+        name=row.name,
+        interval_hours=row.interval_hours,
+        status=row.status,
+        next_run_at=_ensure_utc(row.next_run_at),
+        last_run_at=_ensure_utc(row.last_run_at) if row.last_run_at else None,
+        regions=json.loads(row.regions_json),
+        data_source=row.data_source,
     )
 
 
