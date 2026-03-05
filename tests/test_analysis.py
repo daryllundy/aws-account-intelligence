@@ -45,7 +45,7 @@ def test_impact_analysis_low_risk_for_isolated_bucket() -> None:
     assert report.direct_dependents == []
 
 
-def test_dependency_graph_includes_config_and_iam_edges_from_live_collector_metadata() -> None:
+def test_dependency_graph_includes_config_iam_cloudtrail_and_xray_edges_from_live_collector_metadata() -> None:
     settings = Settings(DATABASE_URL="sqlite+pysqlite:///:memory:", data_source="aws", aws_regions="us-west-2")
     bundle = AwsCollector(settings=settings, session=FakeSession()).load("scan-aws-deps")
 
@@ -61,5 +61,19 @@ def test_dependency_graph_includes_config_and_iam_edges_from_live_collector_meta
         edge.edge_type is EdgeType.IAM
         and edge.from_resource_id.endswith("process-orders-us-west-2")
         and edge.to_resource_id.endswith("cluster/orders-us-west-2")
+        for edge in edges
+    )
+    assert any(
+        edge.edge_type is EdgeType.INVOCATION
+        and edge.evidence_source == "cloudtrail.lookup_events"
+        and edge.from_resource_id.endswith("process-orders-us-west-2")
+        and edge.to_resource_id.endswith("orders-db-us-west-2")
+        for edge in edges
+    )
+    assert any(
+        edge.edge_type is EdgeType.DATA_FLOW
+        and edge.evidence_source == "xray.service_graph"
+        and edge.from_resource_id.endswith("process-orders-us-west-2")
+        and edge.to_resource_id.endswith("orders-db-us-west-2")
         for edge in edges
     )

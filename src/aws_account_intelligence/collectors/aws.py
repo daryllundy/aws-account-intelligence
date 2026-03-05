@@ -77,6 +77,8 @@ class AwsCollector:
             services = self._add_tagging_only_resources(scan_run_id, services, tag_inventory)
             config_warnings = self._enrich_config_relationships(services)
             warnings.extend(config_warnings)
+            trace_warnings = self._enrich_trace_relationships(services)
+            warnings.extend(trace_warnings)
             services, activity_warnings = self._classify_activity(services)
             warnings.extend(activity_warnings)
             costs, cost_warnings = self._collect_costs(scan_run_id, services)
@@ -767,6 +769,98 @@ class AwsCollector:
                     service.metadata["config_related_resources"] = sorted(set(related_resources))
         return warnings
 
+    def _enrich_trace_relationships(self, services: list[ServiceRecord]) -> list[ScanWarning]:
+        warnings: list[ScanWarning] = []
+        by_region: dict[str, list[ServiceRecord]] = defaultdict(list)
+        for service in services:
+            target_region = "us-east-1" if service.region == "global" else service.region
+            by_region[target_region].append(service)
+
+        for region, regional_services in by_region.items():
+            id_map = _service_identifier_index(regional_services)
+            warnings.extend(self._enrich_cloudtrail_relationships(region, regional_services, id_map))
+            warnings.extend(self._enrich_xray_relationships(region, regional_services, id_map))
+        return warnings
+
+    def _enrich_cloudtrail_relationships(
+        self,
+        region: str,
+        services: list[ServiceRecord],
+        id_map: dict[str, str],
+    ) -> list[ScanWarning]:
+        warnings: list[ScanWarning] = []
+        client = self.session.client("cloudtrail", region_name=region)
+        try:
+            response = self._run_with_retries(lambda: client.lookup_events(MaxResults=50))
+        except ClientError as exc:
+            warnings.append(self._warning("cloudtrail_inference", "cloudtrail", region, exc))
+            return warnings
+        except BotoCoreError as exc:
+            warnings.append(
+                ScanWarning(
+                    stage="cloudtrail_inference",
+                    service="cloudtrail",
+                    region=region,
+                    code=type(exc).__name__.upper(),
+                    message=str(exc),
+                )
+            )
+            return warnings
+
+        service_map = {service.resource_id: service for service in services}
+        for event in response.get("Events", []):
+            resources = event.get("Resources", [])
+            if len(resources) < 2:
+                continue
+            source = _lookup_service_id(resources[0].get("ResourceName"), id_map)
+            target = _lookup_service_id(resources[1].get("ResourceName"), id_map)
+            if source and target and source in service_map:
+                service_map[source].metadata.setdefault("cloudtrail_related_resources", []).append(target)
+        return warnings
+
+    def _enrich_xray_relationships(
+        self,
+        region: str,
+        services: list[ServiceRecord],
+        id_map: dict[str, str],
+    ) -> list[ScanWarning]:
+        warnings: list[ScanWarning] = []
+        client = self.session.client("xray", region_name=region)
+        now = datetime.now(UTC)
+        try:
+            response = self._run_with_retries(lambda: client.get_service_graph(StartTime=now - timedelta(days=1), EndTime=now))
+        except ClientError as exc:
+            warnings.append(self._warning("xray_inference", "xray", region, exc))
+            return warnings
+        except BotoCoreError as exc:
+            warnings.append(
+                ScanWarning(
+                    stage="xray_inference",
+                    service="xray",
+                    region=region,
+                    code=type(exc).__name__.upper(),
+                    message=str(exc),
+                )
+            )
+            return warnings
+
+        ref_to_service_id: dict[int, str] = {}
+        for item in response.get("Services", []):
+            service_id = _lookup_service_id(item.get("Name"), id_map)
+            if service_id and item.get("ReferenceId") is not None:
+                ref_to_service_id[item["ReferenceId"]] = service_id
+
+        service_map = {service.resource_id: service for service in services}
+        for item in response.get("Services", []):
+            source_id = ref_to_service_id.get(item.get("ReferenceId"))
+            if not source_id or source_id not in service_map:
+                continue
+            for edge in item.get("Edges", []):
+                target_id = ref_to_service_id.get(edge.get("ReferenceId"))
+                if target_id:
+                    service_map[source_id].metadata.setdefault("xray_related_resources", []).append(target_id)
+        return warnings
+
     def _merged_tags(self, arn: str, tag_index: dict[str, dict[str, Any]], fallback_tags: dict[str, str]) -> dict[str, str]:
         tagging_tags = (tag_index.get(arn) or {}).get("tags", {})
         return {**fallback_tags, **tagging_tags}
@@ -1334,3 +1428,31 @@ def _config_relationship_target(relationship: dict[str, Any]) -> str | None:
     resource_id = relationship.get("resourceId")
     resource_name = relationship.get("resourceName")
     return resource_id or resource_name
+
+
+def _service_identifier_index(services: list[ServiceRecord]) -> dict[str, str]:
+    index: dict[str, str] = {}
+    for service in services:
+        for candidate in {
+            service.resource_id,
+            service.arn,
+            service.metadata.get("instance_id"),
+            service.metadata.get("db_instance_identifier"),
+            service.metadata.get("function_name"),
+            service.metadata.get("queue_name"),
+            service.metadata.get("topic_name"),
+            service.metadata.get("api_id"),
+            service.metadata.get("api_name"),
+            service.metadata.get("cluster_name"),
+            service.metadata.get("cache_cluster_id"),
+            service.metadata.get("distribution_id"),
+        }:
+            if candidate:
+                index[str(candidate)] = service.resource_id
+    return index
+
+
+def _lookup_service_id(identifier: str | None, index: dict[str, str]) -> str | None:
+    if not identifier:
+        return None
+    return index.get(identifier)

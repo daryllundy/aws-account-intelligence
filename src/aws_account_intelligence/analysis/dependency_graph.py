@@ -67,6 +67,34 @@ class DependencyGraphBuilder:
                             rationale="AWS Config reported a resource relationship between these resources.",
                         )
                     )
+            for related in metadata.get("cloudtrail_related_resources", []):
+                target = _resolve_target_resource_id(related, by_id)
+                if target:
+                    edges.append(
+                        DependencyEdge(
+                            from_resource_id=service.resource_id,
+                            to_resource_id=target,
+                            scan_run_id=scan_run_id,
+                            edge_type=EdgeType.INVOCATION,
+                            evidence_source="cloudtrail.lookup_events",
+                            confidence=0.67,
+                            rationale="CloudTrail events indicate these resources interact through recent API activity.",
+                        )
+                    )
+            for related in metadata.get("xray_related_resources", []):
+                target = _resolve_target_resource_id(related, by_id)
+                if target:
+                    edges.append(
+                        DependencyEdge(
+                            from_resource_id=service.resource_id,
+                            to_resource_id=target,
+                            scan_run_id=scan_run_id,
+                            edge_type=EdgeType.DATA_FLOW,
+                            evidence_source="xray.service_graph",
+                            confidence=0.78,
+                            rationale="X-Ray service graph indicates request/data flow between these resources.",
+                        )
+                    )
 
         edges.extend(self._infer_network_edges(services, scan_run_id))
         edges.extend(self._infer_iam_edges(services, scan_run_id))

@@ -281,6 +281,55 @@ class FakeConfigClient:
         return {"baseConfigurationItems": [{"relationships": relationships}]}
 
 
+class FakeCloudTrailClient:
+    def __init__(self, region_name: str | None = None, counters=None, failures=None):
+        self.region_name = region_name
+        self.failures = failures if failures is not None else {}
+
+    def lookup_events(self, MaxResults):
+        failure = self.failures.get((self.region_name, "cloudtrail"))
+        if failure:
+            raise failure
+        if self.region_name != "us-west-2":
+            return {"Events": []}
+        return {
+            "Events": [
+                {
+                    "Resources": [
+                        {"ResourceName": "orders-api"},
+                        {"ResourceName": "process-orders-us-west-2"},
+                    ]
+                },
+                {
+                    "Resources": [
+                        {"ResourceName": "process-orders-us-west-2"},
+                        {"ResourceName": "orders-db-us-west-2"},
+                    ]
+                },
+            ]
+        }
+
+
+class FakeXRayClient:
+    def __init__(self, region_name: str | None = None, counters=None, failures=None):
+        self.region_name = region_name
+        self.failures = failures if failures is not None else {}
+
+    def get_service_graph(self, StartTime, EndTime):
+        failure = self.failures.get((self.region_name, "xray"))
+        if failure:
+            raise failure
+        if self.region_name != "us-west-2":
+            return {"Services": []}
+        return {
+            "Services": [
+                {"ReferenceId": 1, "Name": "orders-api", "Edges": [{"ReferenceId": 2}]},
+                {"ReferenceId": 2, "Name": "process-orders-us-west-2", "Edges": [{"ReferenceId": 3}]},
+                {"ReferenceId": 3, "Name": "orders-db-us-west-2", "Edges": []},
+            ]
+        }
+
+
 class FakeCeClient:
     def __init__(self, region_name: str | None = None, counters=None, failures=None):
         self.failures = failures if failures is not None else {}
@@ -334,6 +383,8 @@ class FakeSession:
             "cloudfront": FakeCloudFrontClient,
             "cloudwatch": FakeCloudWatchClient,
             "config": FakeConfigClient,
+            "cloudtrail": FakeCloudTrailClient,
+            "xray": FakeXRayClient,
             "ce": FakeCeClient,
         }
         return mapping[service_name](region_name=region_name, counters=self.counters, failures=self.failures)
@@ -361,11 +412,16 @@ def test_aws_collector_uses_tagging_as_primary_inventory_source() -> None:
 
     api_service = next(service for service in bundle.services if service.service_name == "apigateway")
     assert api_service.metadata["integrations"] == ["arn:aws:lambda:us-west-2:123456789012:function:process-orders-us-west-2"]
+    assert api_service.metadata["cloudtrail_related_resources"] == ["arn:aws:lambda:us-west-2:123456789012:function:process-orders-us-west-2"]
 
     assert any(service.service_name == "ecs" for service in bundle.services)
     assert any(service.service_name == "eks" for service in bundle.services)
     assert any(service.service_name == "elasticache" for service in bundle.services)
     assert any(service.service_name == "cloudfront" for service in bundle.services)
+
+    lambda_service = next(service for service in bundle.services if service.service_name == "lambda")
+    assert lambda_service.metadata["cloudtrail_related_resources"] == ["arn:aws:rds:us-west-2:123456789012:db:orders-db-us-west-2"]
+    assert lambda_service.metadata["xray_related_resources"] == ["arn:aws:rds:us-west-2:123456789012:db:orders-db-us-west-2"]
 
     unattributed = next(cost for cost in bundle.costs if cost.resource_id == "unattributed")
     assert unattributed.mtd_cost_usd == 1.2
