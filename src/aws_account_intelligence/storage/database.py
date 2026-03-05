@@ -181,6 +181,11 @@ class Database:
             row = session.scalars(select(ScanRunRow).order_by(ScanRunRow.started_at.desc())).first()
             return _scan_run_from_row(row) if row else None
 
+    def list_scan_runs(self, limit: int = 20) -> list[ScanRun]:
+        with self.session() as session:
+            rows = session.scalars(select(ScanRunRow).order_by(ScanRunRow.started_at.desc()).limit(limit)).all()
+            return [_scan_run_from_row(row) for row in rows]
+
     def list_service_records(self, scan_run_id: str) -> list[ServiceRecord]:
         with self.session() as session:
             rows = session.scalars(select(ServiceRecordRow).where(ServiceRecordRow.scan_run_id == scan_run_id)).all()

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from aws_account_intelligence.analysis.dependency_graph import DependencyGraphBuilder
@@ -198,6 +198,12 @@ def create_api_app() -> FastAPI:
     def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    @api.get("/scans")
+    def list_scans(limit: int = Query(default=20, ge=1, le=100)) -> JSONResponse:
+        database, _ = _services()
+        scans = database.list_scan_runs(limit=limit)
+        return JSONResponse([scan.model_dump(mode="json") for scan in scans])
+
     @api.get("/scans/latest")
     def latest_scan() -> JSONResponse:
         database, _ = _services()
@@ -206,4 +212,94 @@ def create_api_app() -> FastAPI:
             return JSONResponse(status_code=404, content={"detail": "No scans found"})
         return JSONResponse(scan.model_dump(mode="json"))
 
+    @api.get("/scans/{scan_run_id}")
+    def scan_detail(scan_run_id: str) -> JSONResponse:
+        database, _ = _services()
+        scan = database.get_scan_run(scan_run_id)
+        if scan is None:
+            raise HTTPException(status_code=404, detail=f"Unknown scan run: {scan_run_id}")
+        return JSONResponse(scan.model_dump(mode="json"))
+
+    @api.get("/inventory")
+    def inventory(
+        scan_run_id: str | None = None,
+        latest: bool = True,
+        service_name: str | None = None,
+        region: str | None = None,
+        status: str | None = None,
+        search: str | None = None,
+    ) -> JSONResponse:
+        database, pipeline = _services()
+        resolved = _resolve_api_scan_id(database, scan_run_id, latest)
+        response = pipeline.inventory(resolved)
+        services = response.services
+        if service_name:
+            services = [item for item in services if item.service_name == service_name]
+        if region:
+            services = [item for item in services if item.region == region]
+        if status:
+            status_normalized = status.upper()
+            services = [item for item in services if item.status.value == status_normalized]
+        if search:
+            needle = search.lower()
+            services = [
+                item
+                for item in services
+                if needle in item.resource_id.lower()
+                or needle in item.arn.lower()
+                or any(needle in value.lower() for value in item.tags.values())
+            ]
+        payload = response.model_copy(update={"services": services})
+        return JSONResponse(payload.model_dump(mode="json"))
+
+    @api.get("/costs/summary")
+    def api_cost_summary(scan_run_id: str | None = None, latest: bool = True) -> JSONResponse:
+        database, pipeline = _services()
+        resolved = _resolve_api_scan_id(database, scan_run_id, latest)
+        response = pipeline.costs(resolved)
+        return JSONResponse(response.model_dump(mode="json"))
+
+    @api.get("/graph")
+    def graph_export_api(
+        scan_run_id: str | None = None,
+        latest: bool = True,
+        edge_type: str | None = None,
+        resource_id: str | None = None,
+    ) -> JSONResponse:
+        database, _ = _services()
+        resolved = _resolve_api_scan_id(database, scan_run_id, latest)
+        scan = database.get_scan_run(resolved)
+        if scan is None:
+            raise HTTPException(status_code=404, detail=f"Unknown scan run: {resolved}")
+        edges = database.list_dependency_edges(resolved)
+        if edge_type:
+            edges = [edge for edge in edges if edge.edge_type.value == edge_type.upper()]
+        if resource_id:
+            edges = [edge for edge in edges if resource_id in {edge.from_resource_id, edge.to_resource_id}]
+        response = DependencyGraphBuilder().export(scan, edges)
+        return JSONResponse(response.model_dump(mode="json"))
+
+    @api.get("/impact")
+    def impact(
+        resource: str,
+        scan_run_id: str | None = None,
+        latest: bool = True,
+    ) -> JSONResponse:
+        database, _ = _services()
+        resolved = _resolve_api_scan_id(database, scan_run_id, latest)
+        services = database.list_service_records(resolved)
+        if resource not in {service.resource_id for service in services}:
+            raise HTTPException(status_code=404, detail=f"Unknown resource: {resource}")
+        costs = {item.resource_id: item.projected_monthly_cost_usd for item in database.list_cost_attributions(resolved)}
+        edges = database.list_dependency_edges(resolved)
+        report = ImpactAnalyzer().analyze(resolved, resource, services, costs, edges)
+        return JSONResponse(report.model_dump(mode="json"))
+
     return api
+
+
+def _resolve_api_scan_id(database: Database, scan_run_id: str | None, latest: bool) -> str:
+    try:
+        return _resolve_scan_id(database, scan_run_id, latest)
+    except typer.BadParameter as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
