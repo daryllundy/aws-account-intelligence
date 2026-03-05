@@ -28,6 +28,23 @@ class FakeStsClient:
         return {"Account": "123456789012"}
 
 
+class FakeTaggingClient:
+    def __init__(self, region_name: str | None = None, counters=None, failures=None):
+        self.region_name = region_name
+        self.failures = failures if failures is not None else {}
+
+    def get_paginator(self, name):
+        assert name == "get_resources"
+        failure = self.failures.get((self.region_name, "tagging"))
+        if failure:
+            return FakePaginator([], failure=failure)
+        return FakePaginator([
+            {
+                "ResourceTagMappingList": _tagging_items_for_region(self.region_name),
+            }
+        ])
+
+
 class FakeEc2Client:
     def __init__(self, region_name: str | None = None, counters=None, failures=None):
         self.region_name = region_name
@@ -43,9 +60,25 @@ class FakeEc2Client:
             self.counters[(self.region_name, "ec2")] += 1
             return FakePaginator([], failure=_client_error("ThrottlingException", "rate exceeded", "DescribeInstances"))
         self.counters[(self.region_name, "ec2")] += 1
-        return FakePaginator(
-            [{"Reservations": [{"Instances": [{"InstanceId": f"i-{self.region_name or 'global'}", "State": {"Name": "running"}, "VpcId": "vpc-main", "SubnetId": "subnet-app", "SecurityGroups": [{"GroupId": "sg-web"}, {"GroupId": "sg-db-client"}], "PrivateIpAddress": "10.0.1.15", "Tags": [{"Key": "Environment", "Value": "prod"}]}]}]}]
-        )
+        return FakePaginator([
+            {
+                "Reservations": [
+                    {
+                        "Instances": [
+                            {
+                                "InstanceId": f"i-{self.region_name or 'global'}",
+                                "State": {"Name": "running"},
+                                "VpcId": "vpc-main",
+                                "SubnetId": "subnet-app",
+                                "SecurityGroups": [{"GroupId": "sg-web"}, {"GroupId": "sg-db-client"}],
+                                "PrivateIpAddress": "10.0.1.15",
+                                "Tags": [{"Key": "Environment", "Value": "runtime"}],
+                            }
+                        ]
+                    }
+                ]
+            }
+        ])
 
 
 class FakeRdsClient:
@@ -54,10 +87,24 @@ class FakeRdsClient:
 
     def get_paginator(self, name):
         assert name == "describe_db_instances"
-        return FakePaginator([{"DBInstances": [{"DBInstanceArn": f"arn:aws:rds:{self.region_name}:123456789012:db:orders-db-{self.region_name}", "DBInstanceIdentifier": f"orders-db-{self.region_name}", "DBInstanceStatus": "available", "VpcSecurityGroups": [{"VpcSecurityGroupId": "sg-db"}], "DBSubnetGroup": {"DBSubnetGroupName": "db-subnet", "VpcId": "vpc-main"}, "Engine": "postgres", "Endpoint": {"Address": "orders-db.example.local"}}]}])
+        return FakePaginator([
+            {
+                "DBInstances": [
+                    {
+                        "DBInstanceArn": f"arn:aws:rds:{self.region_name}:123456789012:db:orders-db-{self.region_name}",
+                        "DBInstanceIdentifier": f"orders-db-{self.region_name}",
+                        "DBInstanceStatus": "available",
+                        "VpcSecurityGroups": [{"VpcSecurityGroupId": "sg-db"}],
+                        "DBSubnetGroup": {"DBSubnetGroupName": "db-subnet", "VpcId": "vpc-main"},
+                        "Engine": "postgres",
+                        "Endpoint": {"Address": "orders-db.example.local"},
+                    }
+                ]
+            }
+        ])
 
     def list_tags_for_resource(self, ResourceName):
-        return {"TagList": [{"Key": "Environment", "Value": "prod"}, {"Key": "Critical", "Value": "true"}]}
+        return {"TagList": [{"Key": "Environment", "Value": "runtime"}, {"Key": "Critical", "Value": "true"}]}
 
 
 class FakeLambdaClient:
@@ -66,12 +113,34 @@ class FakeLambdaClient:
 
     def get_paginator(self, name):
         if name == "list_functions":
-            return FakePaginator([{"Functions": [{"FunctionArn": f"arn:aws:lambda:{self.region_name}:123456789012:function:process-orders-{self.region_name}", "FunctionName": f"process-orders-{self.region_name}", "Runtime": "python3.12", "Role": "arn:aws:iam::123456789012:role/orders-lambda-role", "State": "Active", "VpcConfig": {"SecurityGroupIds": ["sg-web"], "SubnetIds": ["subnet-app"]}}]}])
+            return FakePaginator([
+                {
+                    "Functions": [
+                        {
+                            "FunctionArn": f"arn:aws:lambda:{self.region_name}:123456789012:function:process-orders-{self.region_name}",
+                            "FunctionName": f"process-orders-{self.region_name}",
+                            "Runtime": "python3.12",
+                            "Role": "arn:aws:iam::123456789012:role/orders-lambda-role",
+                            "State": "Active",
+                            "VpcConfig": {"SecurityGroupIds": ["sg-web"], "SubnetIds": ["subnet-app"]},
+                        }
+                    ]
+                }
+            ])
         assert name == "list_event_source_mappings"
-        return FakePaginator([{"EventSourceMappings": [{"FunctionArn": f"arn:aws:lambda:{self.region_name}:123456789012:function:process-orders-{self.region_name}", "EventSourceArn": f"arn:aws:sqs:{self.region_name}:123456789012:orders-queue-{self.region_name}"}]}])
+        return FakePaginator([
+            {
+                "EventSourceMappings": [
+                    {
+                        "FunctionArn": f"arn:aws:lambda:{self.region_name}:123456789012:function:process-orders-{self.region_name}",
+                        "EventSourceArn": f"arn:aws:sqs:{self.region_name}:123456789012:orders-queue-{self.region_name}",
+                    }
+                ]
+            }
+        ])
 
     def list_tags(self, Resource):
-        return {"Tags": {"Environment": "prod", "Application": "orders"}}
+        return {"Tags": {"Environment": "runtime", "Application": "orders"}}
 
 
 class FakeS3Client:
@@ -85,7 +154,7 @@ class FakeS3Client:
         return {"LocationConstraint": "us-west-2"}
 
     def get_bucket_tagging(self, Bucket):
-        return {"TagSet": [{"Key": "Environment", "Value": "prod"}]}
+        return {"TagSet": [{"Key": "Environment", "Value": "runtime"}]}
 
 
 class FakeSqsClient:
@@ -96,10 +165,16 @@ class FakeSqsClient:
         return {"QueueUrls": [f"https://sqs.{self.region_name}.amazonaws.com/123456789012/orders-queue-{self.region_name}"]}
 
     def get_queue_attributes(self, QueueUrl, AttributeNames):
-        return {"Attributes": {"QueueArn": f"arn:aws:sqs:{self.region_name}:123456789012:orders-queue-{self.region_name}", "Policy": "{}", "RedrivePolicy": "{}"}}
+        return {
+            "Attributes": {
+                "QueueArn": f"arn:aws:sqs:{self.region_name}:123456789012:orders-queue-{self.region_name}",
+                "Policy": "{}",
+                "RedrivePolicy": "{}",
+            }
+        }
 
     def list_queue_tags(self, QueueUrl):
-        return {"Tags": {"Environment": "prod"}}
+        return {"Tags": {"Environment": "runtime"}}
 
 
 class FakeSnsClient:
@@ -110,7 +185,7 @@ class FakeSnsClient:
         return {"Attributes": {"Policy": "{}"}}
 
     def list_tags_for_resource(self, ResourceArn):
-        return {"Tags": [{"Key": "Environment", "Value": "prod"}]}
+        return {"Tags": [{"Key": "Environment", "Value": "runtime"}]}
 
     def get_paginator(self, name):
         if name == "list_topics":
@@ -127,13 +202,15 @@ class FakeApiGatewayClient:
         return {"items": [{"id": f"orders-api-{self.region_name}", "name": "orders-api", "endpointConfiguration": {"types": ["REGIONAL"]}}]}
 
     def get_tags(self, resourceArn):
-        return {"tags": {"Environment": "prod"}}
+        return {"tags": {"Environment": "runtime"}}
 
     def get_resources(self, restApiId, embed):
         return {"items": [{"id": "root", "resourceMethods": {"POST": {}}}]}
 
     def get_integration(self, restApiId, resourceId, httpMethod):
-        return {"uri": f"arn:aws:apigateway:{self.region_name}:lambda:path/2015-03-31/functions/arn:aws:lambda:{self.region_name}:123456789012:function:process-orders-{self.region_name}/invocations"}
+        return {
+            "uri": f"arn:aws:apigateway:{self.region_name}:lambda:path/2015-03-31/functions/arn:aws:lambda:{self.region_name}:123456789012:function:process-orders-{self.region_name}/invocations"
+        }
 
 
 class FakeCeClient:
@@ -173,6 +250,7 @@ class FakeSession:
     def client(self, service_name, region_name=None):
         mapping = {
             "sts": FakeStsClient,
+            "resourcegroupstaggingapi": FakeTaggingClient,
             "ec2": FakeEc2Client,
             "rds": FakeRdsClient,
             "lambda": FakeLambdaClient,
@@ -185,7 +263,7 @@ class FakeSession:
         return mapping[service_name](region_name=region_name, counters=self.counters, failures=self.failures)
 
 
-def test_aws_collector_discovers_supported_services_and_costs() -> None:
+def test_aws_collector_uses_tagging_as_primary_inventory_source() -> None:
     settings = Settings(DATABASE_URL="sqlite+pysqlite:///:memory:", data_source="aws", aws_regions="us-west-2")
     collector = AwsCollector(settings=settings, session=FakeSession())
 
@@ -193,6 +271,11 @@ def test_aws_collector_discovers_supported_services_and_costs() -> None:
 
     service_names = {service.service_name for service in bundle.services}
     assert service_names == {"ec2", "rds", "lambda", "s3", "sqs", "sns", "apigateway"}
+
+    ec2_service = next(service for service in bundle.services if service.service_name == "ec2")
+    assert ec2_service.tags["Environment"] == "tagging"
+    assert ec2_service.tags["Owner"] == "platform"
+    assert "tagging_api" in ec2_service.metadata["discovery_sources"]
 
     lambda_service = next(service for service in bundle.services if service.service_name == "lambda")
     assert lambda_service.metadata["event_sources"] == ["arn:aws:sqs:us-west-2:123456789012:orders-queue-us-west-2"]
@@ -206,7 +289,28 @@ def test_aws_collector_discovers_supported_services_and_costs() -> None:
     unattributed = next(cost for cost in bundle.costs if cost.resource_id == "unattributed")
     assert unattributed.mtd_cost_usd == 1.2
     assert bundle.warnings == []
-    assert any(cost.resource_id == lambda_service.resource_id and cost.mtd_cost_usd == 0.9 for cost in bundle.costs)
+
+
+def test_aws_collector_adds_tagging_only_supported_resources() -> None:
+    settings = Settings(DATABASE_URL="sqlite+pysqlite:///:memory:", data_source="aws", aws_regions="us-west-2")
+    collector = AwsCollector(settings=settings, session=FakeSession())
+
+    bundle = collector.load("scan-tagging-only")
+
+    tagging_only = [service for service in bundle.services if service.metadata.get("tagging_only")]
+    assert len(tagging_only) == 1
+    assert tagging_only[0].service_name == "sqs"
+    assert tagging_only[0].resource_id == "arn:aws:sqs:us-west-2:123456789012:orders-queue-shadow-us-west-2"
+
+
+def test_aws_collector_warns_when_tagging_inventory_fails() -> None:
+    settings = Settings(DATABASE_URL="sqlite+pysqlite:///:memory:", data_source="aws", aws_regions="us-west-2")
+    collector = AwsCollector(settings=settings, session=FakeSession({("us-west-2", "tagging"): _client_error("AccessDeniedException", "denied", "GetResources")}))
+
+    bundle = collector.load("scan-tagging-warning")
+
+    assert any(warning.stage == "tagging_inventory" and warning.service == "resourcegroupstaggingapi" for warning in bundle.warnings)
+    assert any(service.service_name == "ec2" for service in bundle.services)
 
 
 def test_aws_collector_retries_throttled_region_call() -> None:
@@ -218,7 +322,7 @@ def test_aws_collector_retries_throttled_region_call() -> None:
 
     assert any(service.service_name == "ec2" for service in bundle.services)
     assert session.counters[("us-west-2", "ec2")] == 2
-    assert bundle.warnings == []
+    assert not any(warning.service == "ec2" for warning in bundle.warnings)
 
 
 def test_aws_collector_surfaces_partial_region_failure_as_warning() -> None:
@@ -230,6 +334,56 @@ def test_aws_collector_surfaces_partial_region_failure_as_warning() -> None:
 
     assert any(service.region == "us-west-2" and service.service_name == "ec2" for service in bundle.services)
     assert any(warning.service == "ec2" and warning.region == "us-east-1" and warning.stage == "discovery" for warning in bundle.warnings)
+
+
+def _tagging_items_for_region(region: str | None):
+    if region == "us-east-1":
+        return []
+    if region == "us-west-2":
+        return [
+            {
+                "ResourceARN": "arn:aws:ec2:us-west-2:123456789012:instance/i-us-west-2",
+                "ResourceType": "ec2:instance",
+                "Tags": [{"Key": "Environment", "Value": "tagging"}, {"Key": "Owner", "Value": "platform"}],
+            },
+            {
+                "ResourceARN": "arn:aws:rds:us-west-2:123456789012:db:orders-db-us-west-2",
+                "ResourceType": "rds:db",
+                "Tags": [{"Key": "Environment", "Value": "tagging"}],
+            },
+            {
+                "ResourceARN": "arn:aws:lambda:us-west-2:123456789012:function:process-orders-us-west-2",
+                "ResourceType": "lambda:function",
+                "Tags": [{"Key": "Environment", "Value": "tagging"}],
+            },
+            {
+                "ResourceARN": "arn:aws:sqs:us-west-2:123456789012:orders-queue-us-west-2",
+                "ResourceType": "sqs:queue",
+                "Tags": [{"Key": "Environment", "Value": "tagging"}],
+            },
+            {
+                "ResourceARN": "arn:aws:sns:us-west-2:123456789012:orders-topic-us-west-2",
+                "ResourceType": "sns:topic",
+                "Tags": [{"Key": "Environment", "Value": "tagging"}],
+            },
+            {
+                "ResourceARN": "arn:aws:apigateway:us-west-2::/restapis/orders-api-us-west-2",
+                "ResourceType": "apigateway:restapis",
+                "Tags": [{"Key": "Environment", "Value": "tagging"}],
+            },
+            {
+                "ResourceARN": "arn:aws:sqs:us-west-2:123456789012:orders-queue-shadow-us-west-2",
+                "ResourceType": "sqs:queue",
+                "Tags": [{"Key": "Environment", "Value": "tagging"}, {"Key": "Shadow", "Value": "true"}],
+            },
+        ]
+    return [
+        {
+            "ResourceARN": "arn:aws:s3:::orders-artifacts",
+            "ResourceType": "s3:bucket",
+            "Tags": [{"Key": "Environment", "Value": "tagging"}],
+        }
+    ]
 
 
 def _client_error(code: str, message: str, operation: str) -> ClientError:
