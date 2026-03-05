@@ -1,0 +1,78 @@
+{
+  "account_id": "123456789012",
+  "resources": [
+    {
+      "resource_id": "arn:aws:ec2:us-west-2:123456789012:instance/i-web123",
+      "arn": "arn:aws:ec2:us-west-2:123456789012:instance/i-web123",
+      "resource_type": "AWS::EC2::Instance",
+      "service_name": "ec2",
+      "region": "us-west-2",
+      "tags": {"Name": "web", "Environment": "prod", "Application": "orders"},
+      "metadata": {"vpc_id": "vpc-main", "subnet_id": "subnet-app", "security_groups": ["sg-web", "sg-db-client"]}
+    },
+    {
+      "resource_id": "arn:aws:rds:us-west-2:123456789012:db:orders-db",
+      "arn": "arn:aws:rds:us-west-2:123456789012:db:orders-db",
+      "resource_type": "AWS::RDS::DBInstance",
+      "service_name": "rds",
+      "region": "us-west-2",
+      "tags": {"Name": "orders-db", "Environment": "prod", "Application": "orders", "Critical": "true"},
+      "metadata": {"vpc_id": "vpc-main", "subnet_id": "subnet-data", "security_groups": ["sg-db"]}
+    },
+    {
+      "resource_id": "arn:aws:lambda:us-west-2:123456789012:function:process-orders",
+      "arn": "arn:aws:lambda:us-west-2:123456789012:function:process-orders",
+      "resource_type": "AWS::Lambda::Function",
+      "service_name": "lambda",
+      "region": "us-west-2",
+      "tags": {"Environment": "prod", "Application": "orders"},
+      "metadata": {"event_sources": ["arn:aws:sqs:us-west-2:123456789012:orders-queue"], "execution_role": "arn:aws:iam::123456789012:role/orders-lambda-role"}
+    },
+    {
+      "resource_id": "arn:aws:sqs:us-west-2:123456789012:orders-queue",
+      "arn": "arn:aws:sqs:us-west-2:123456789012:orders-queue",
+      "resource_type": "AWS::SQS::Queue",
+      "service_name": "sqs",
+      "region": "us-west-2",
+      "tags": {"Environment": "prod", "Application": "orders"},
+      "metadata": {"subscriptions": ["arn:aws:sns:us-west-2:123456789012:orders-topic"]}
+    },
+    {
+      "resource_id": "arn:aws:sns:us-west-2:123456789012:orders-topic",
+      "arn": "arn:aws:sns:us-west-2:123456789012:orders-topic",
+      "resource_type": "AWS::SNS::Topic",
+      "service_name": "sns",
+      "region": "us-west-2",
+      "tags": {"Environment": "prod", "Application": "orders"},
+      "metadata": {}
+    },
+    {
+      "resource_id": "arn:aws:apigateway:us-west-2::/restapis/orders-api",
+      "arn": "arn:aws:apigateway:us-west-2::/restapis/orders-api",
+      "resource_type": "AWS::ApiGateway::RestApi",
+      "service_name": "apigateway",
+      "region": "us-west-2",
+      "tags": {"Environment": "prod", "Application": "orders"},
+      "metadata": {"integrations": ["arn:aws:lambda:us-west-2:123456789012:function:process-orders"]}
+    },
+    {
+      "resource_id": "arn:aws:s3:::orders-artifacts",
+      "arn": "arn:aws:s3:::orders-artifacts",
+      "resource_type": "AWS::S3::Bucket",
+      "service_name": "s3",
+      "region": "us-west-2",
+      "tags": {"Environment": "prod", "Application": "orders"},
+      "metadata": {}
+    }
+  ],
+  "costs": [
+    {"resource_id": "arn:aws:ec2:us-west-2:123456789012:instance/i-web123", "mtd_cost_usd": 112.5, "projected_monthly_cost_usd": 187.5, "prior_30_day_cost_usd": 108.0, "attribution_method": "DIRECT", "confidence": 0.99},
+    {"resource_id": "arn:aws:rds:us-west-2:123456789012:db:orders-db", "mtd_cost_usd": 230.0, "projected_monthly_cost_usd": 383.33, "prior_30_day_cost_usd": 225.0, "attribution_method": "DIRECT", "confidence": 0.99},
+    {"resource_id": "arn:aws:lambda:us-west-2:123456789012:function:process-orders", "mtd_cost_usd": 14.8, "projected_monthly_cost_usd": 24.67, "prior_30_day_cost_usd": 13.5, "attribution_method": "DIRECT", "confidence": 0.95},
+    {"resource_id": "arn:aws:sqs:us-west-2:123456789012:orders-queue", "mtd_cost_usd": 3.5, "projected_monthly_cost_usd": 5.83, "prior_30_day_cost_usd": 2.2, "attribution_method": "DIRECT", "confidence": 0.95},
+    {"resource_id": "arn:aws:sns:us-west-2:123456789012:orders-topic", "mtd_cost_usd": 1.25, "projected_monthly_cost_usd": 2.08, "prior_30_day_cost_usd": 1.0, "attribution_method": "DIRECT", "confidence": 0.95},
+    {"resource_id": "arn:aws:apigateway:us-west-2::/restapis/orders-api", "mtd_cost_usd": 18.75, "projected_monthly_cost_usd": 31.25, "prior_30_day_cost_usd": 17.8, "attribution_method": "TAG_MATCH", "confidence": 0.78},
+    {"resource_id": "arn:aws:s3:::orders-artifacts", "mtd_cost_usd": 7.9, "projected_monthly_cost_usd": 13.17, "prior_30_day_cost_usd": 6.8, "attribution_method": "BEST_EFFORT", "confidence": 0.65},
+    {"resource_id": "unattributed", "mtd_cost_usd": 9.0, "projected_monthly_cost_usd": 15.0, "prior_30_day_cost_usd": 8.0, "attribution_method": "UNATTRIBUTED", "confidence": 0.1}
+  ]
+}

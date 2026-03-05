@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aws-account-intelligence"
+version = "0.1.0"
+description = "CLI-first AWS account inventory, cost, and dependency analysis tool"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Daryl" }]
+dependencies = [
+  "boto3>=1.34.0",
+  "fastapi>=0.116.0",
+  "networkx>=3.4",
+  "pydantic>=2.10.0",
+  "pydantic-settings>=2.6.0",
+  "python-dotenv>=1.0.1",
+  "sqlalchemy>=2.0.36",
+  "psycopg[binary]>=3.2.3",
+  "typer>=0.15.1",
+  "uvicorn>=0.34.0"
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx>=0.28.1",
+  "pytest>=8.3.4",
+  "pytest-cov>=6.0.0"
+]
+
+[project.scripts]
+aws-account-intel = "aws_account_intelligence.cli.main:app"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+addopts = "-q"

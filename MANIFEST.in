@@ -1,0 +1,2 @@
+recursive-include src/aws_account_intelligence/fixtures *.json
+include README.md
