@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     aws_region_concurrency: int = 4
     aws_retry_attempts: int = 3
     aws_retry_base_delay_ms: int = 50
+    aws_org_role_name: str = "AccountIntelligenceReadOnly"
+    aws_org_account_limit: int = 25
 
     @property
     def region_list(self) -> list[str]:

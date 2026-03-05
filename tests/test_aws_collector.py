@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from botocore.exceptions import ClientError
 
 from aws_account_intelligence.collectors.aws import AwsCollector
+from aws_account_intelligence.collectors.orgs import OrganizationsCollector
 from aws_account_intelligence.config import Settings
 
 
@@ -22,10 +23,20 @@ class FakePaginator:
 
 class FakeStsClient:
     def __init__(self, region_name: str | None = None, counters=None, failures=None):
-        pass
+        self.failures = failures if failures is not None else {}
 
     def get_caller_identity(self):
         return {"Account": "123456789012"}
+
+    def assume_role(self, RoleArn, RoleSessionName):
+        account_id = RoleArn.split(":")[4]
+        return {
+            "Credentials": {
+                "AccessKeyId": f"AKIA{account_id}",
+                "SecretAccessKey": "secret",
+                "SessionToken": f"token-{account_id}",
+            }
+        }
 
 
 class FakeTaggingClient:
@@ -361,10 +372,29 @@ class FakeCeClient:
         }
 
 
+class FakeOrganizationsClient:
+    def __init__(self, region_name: str | None = None, counters=None, failures=None):
+        self.failures = failures if failures is not None else {}
+
+    def get_paginator(self, name):
+        assert name == "list_accounts"
+        return FakePaginator(
+            [
+                {
+                    "Accounts": [
+                        {"Id": "123456789012", "Name": "primary", "Status": "ACTIVE"},
+                        {"Id": "210987654321", "Name": "sandbox", "Status": "ACTIVE"},
+                    ]
+                }
+            ]
+        )
+
+
 class FakeSession:
-    def __init__(self, failures=None):
+    def __init__(self, failures=None, account_id="123456789012"):
         self.failures = failures or {}
         self.counters = defaultdict(int)
+        self.account_id = account_id
 
     def client(self, service_name, region_name=None):
         mapping = {
@@ -386,8 +416,12 @@ class FakeSession:
             "cloudtrail": FakeCloudTrailClient,
             "xray": FakeXRayClient,
             "ce": FakeCeClient,
+            "organizations": FakeOrganizationsClient,
         }
-        return mapping[service_name](region_name=region_name, counters=self.counters, failures=self.failures)
+        client = mapping[service_name](region_name=region_name, counters=self.counters, failures=self.failures)
+        if service_name == "sts":
+            client.get_caller_identity = lambda: {"Account": self.account_id}
+        return client
 
 
 def test_aws_collector_uses_tagging_as_primary_inventory_source() -> None:
@@ -494,6 +528,30 @@ def test_aws_collector_surfaces_partial_region_failure_as_warning() -> None:
 
     assert any(service.region == "us-west-2" and service.service_name == "ec2" for service in bundle.services)
     assert any(warning.service == "ec2" and warning.region == "us-east-1" and warning.stage == "discovery" for warning in bundle.warnings)
+
+
+def test_orgs_collector_scans_multiple_accounts() -> None:
+    settings = Settings(
+        DATABASE_URL="sqlite+pysqlite:///:memory:",
+        data_source="aws_orgs",
+        aws_regions="us-west-2",
+        aws_org_account_limit=5,
+    )
+
+    def account_session_factory(account_id: str):
+        return FakeSession(account_id=account_id)
+
+    collector = OrganizationsCollector(
+        settings=settings,
+        session=FakeSession(),
+        account_session_factory=account_session_factory,
+    )
+
+    bundle = collector.load("scan-orgs-1")
+
+    account_ids = {service.account_id for service in bundle.services}
+    assert account_ids == {"123456789012", "210987654321"}
+    assert {service.metadata["account_name"] for service in bundle.services} == {"primary", "sandbox"}
 
 
 def _tagging_items_for_region(region: str | None):

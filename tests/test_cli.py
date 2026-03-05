@@ -139,3 +139,13 @@ def test_cli_report_export_formats(tmp_path: Path) -> None:
     assert targets["pdf"].read_bytes().startswith(b"%PDF")
     assert "AWS Account Intelligence" in targets["slack"].read_text()
     assert "Subject: AWS Account Intelligence Snapshot" in targets["email"].read_text()
+
+
+def test_cli_account_summary() -> None:
+    scan_result = runner.invoke(app, ["scan", "run", "--output", "json"])
+    assert scan_result.exit_code == 0, scan_result.stdout
+
+    summary_result = runner.invoke(app, ["account", "summary", "--latest", "--output", "json"])
+    assert summary_result.exit_code == 0, summary_result.stdout
+    payload = json.loads(summary_result.stdout)
+    assert payload[0]["account_id"] == "123456789012"

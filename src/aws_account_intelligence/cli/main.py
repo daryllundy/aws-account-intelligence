@@ -40,6 +40,8 @@ app.add_typer(iam_app, name="iam")
 app.add_typer(api_app, name="api")
 app.add_typer(schedule_app, name="schedule")
 app.add_typer(report_app, name="report")
+account_app = typer.Typer()
+app.add_typer(account_app, name="account")
 
 
 @app.callback()
@@ -137,25 +139,46 @@ def scan_status(scan_run_id: str | None = None, latest: bool = True, output: str
 def inventory_list(
     scan_run_id: str | None = None,
     latest: bool = True,
+    account_id: str | None = None,
     output: str = "table",
     csv_path: Path | None = None,
 ) -> None:
     database, pipeline = _services()
     resolved = _resolve_scan_id(database, scan_run_id, latest)
     response = pipeline.inventory(resolved)
-    _emit(response.model_dump(mode="json"), output, csv_path)
+    services = response.services
+    if account_id:
+        services = [service for service in services if service.account_id == account_id]
+    _emit(response.model_copy(update={"services": services}).model_dump(mode="json"), output, csv_path)
 
 
 @cost_app.command("summary")
 def cost_summary(
     scan_run_id: str | None = None,
     latest: bool = True,
+    account_id: str | None = None,
     output: str = "json",
     csv_path: Path | None = None,
 ) -> None:
     database, pipeline = _services()
     resolved = _resolve_scan_id(database, scan_run_id, latest)
     response = pipeline.costs(resolved)
+    costs = response.costs
+    if account_id:
+        service_ids = {
+            service.resource_id
+            for service in database.list_service_records(resolved)
+            if service.account_id == account_id
+        }
+        costs = [cost for cost in costs if cost.resource_id in service_ids]
+        response = response.model_copy(
+            update={
+                "costs": costs,
+                "total_mtd_cost_usd": round(sum(cost.mtd_cost_usd for cost in costs), 2),
+                "total_projected_monthly_cost_usd": round(sum(cost.projected_monthly_cost_usd for cost in costs), 2),
+                "unattributed_cost_usd": 0.0,
+            }
+        )
     _emit(response.model_dump(mode="json"), output, csv_path)
 
 
@@ -235,6 +258,33 @@ def report_export(
     typer.echo(str(target))
 
 
+@account_app.command("summary")
+def account_summary(scan_run_id: str | None = None, latest: bool = True, output: str = "json") -> None:
+    database, _ = _services()
+    resolved = _resolve_scan_id(database, scan_run_id, latest)
+    services = database.list_service_records(resolved)
+    costs = {item.resource_id: item.projected_monthly_cost_usd for item in database.list_cost_attributions(resolved)}
+    summary: dict[str, dict[str, object]] = {}
+    for service in services:
+        account = summary.setdefault(
+            service.account_id,
+            {
+                "account_id": service.account_id,
+                "account_name": service.metadata.get("account_name"),
+                "resource_count": 0,
+                "projected_monthly_cost_usd": 0.0,
+                "regions": set(),
+            },
+        )
+        account["resource_count"] = int(account["resource_count"]) + 1
+        account["projected_monthly_cost_usd"] = round(float(account["projected_monthly_cost_usd"]) + costs.get(service.resource_id, 0.0), 2)
+        account["regions"].add(service.region)
+    payload = []
+    for item in summary.values():
+        payload.append({**item, "regions": sorted(item["regions"])})
+    _emit(sorted(payload, key=lambda item: item["account_id"]), output)
+
+
 @api_app.command("serve")
 def api_serve(host: str = "127.0.0.1", port: int = 8000) -> None:
     import uvicorn
@@ -280,6 +330,7 @@ def create_api_app() -> FastAPI:
     def inventory(
         scan_run_id: str | None = None,
         latest: bool = True,
+        account_id: str | None = None,
         service_name: str | None = None,
         region: str | None = None,
         status: str | None = None,
@@ -289,6 +340,8 @@ def create_api_app() -> FastAPI:
         resolved = _resolve_api_scan_id(database, scan_run_id, latest)
         response = pipeline.inventory(resolved)
         services = response.services
+        if account_id:
+            services = [item for item in services if item.account_id == account_id]
         if service_name:
             services = [item for item in services if item.service_name == service_name]
         if region:
@@ -309,10 +362,25 @@ def create_api_app() -> FastAPI:
         return JSONResponse(payload.model_dump(mode="json"))
 
     @api.get("/costs/summary")
-    def api_cost_summary(scan_run_id: str | None = None, latest: bool = True) -> JSONResponse:
+    def api_cost_summary(scan_run_id: str | None = None, latest: bool = True, account_id: str | None = None) -> JSONResponse:
         database, pipeline = _services()
         resolved = _resolve_api_scan_id(database, scan_run_id, latest)
         response = pipeline.costs(resolved)
+        if account_id:
+            service_ids = {
+                service.resource_id
+                for service in database.list_service_records(resolved)
+                if service.account_id == account_id
+            }
+            costs = [cost for cost in response.costs if cost.resource_id in service_ids]
+            response = response.model_copy(
+                update={
+                    "costs": costs,
+                    "total_mtd_cost_usd": round(sum(cost.mtd_cost_usd for cost in costs), 2),
+                    "total_projected_monthly_cost_usd": round(sum(cost.projected_monthly_cost_usd for cost in costs), 2),
+                    "unattributed_cost_usd": 0.0,
+                }
+            )
         return JSONResponse(response.model_dump(mode="json"))
 
     @api.get("/scans/{scan_run_id}/delta")
@@ -363,6 +431,30 @@ def create_api_app() -> FastAPI:
     def schedules() -> JSONResponse:
         _, pipeline = _services()
         return JSONResponse([schedule.model_dump(mode="json") for schedule in pipeline.list_schedules()])
+
+    @api.get("/accounts/summary")
+    def accounts_summary(scan_run_id: str | None = None, latest: bool = True) -> JSONResponse:
+        database, _ = _services()
+        resolved = _resolve_api_scan_id(database, scan_run_id, latest)
+        services = database.list_service_records(resolved)
+        costs = {item.resource_id: item.projected_monthly_cost_usd for item in database.list_cost_attributions(resolved)}
+        summary: dict[str, dict[str, object]] = {}
+        for service in services:
+            account = summary.setdefault(
+                service.account_id,
+                {
+                    "account_id": service.account_id,
+                    "account_name": service.metadata.get("account_name"),
+                    "resource_count": 0,
+                    "projected_monthly_cost_usd": 0.0,
+                    "regions": set(),
+                },
+            )
+            account["resource_count"] = int(account["resource_count"]) + 1
+            account["projected_monthly_cost_usd"] = round(float(account["projected_monthly_cost_usd"]) + costs.get(service.resource_id, 0.0), 2)
+            account["regions"].add(service.region)
+        payload = [{**item, "regions": sorted(item["regions"])} for item in summary.values()]
+        return JSONResponse(sorted(payload, key=lambda item: item["account_id"]))
 
     return api
 

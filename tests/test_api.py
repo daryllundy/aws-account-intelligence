@@ -111,3 +111,15 @@ def test_api_exposes_delta_endpoint() -> None:
     payload = response.json()
     assert payload["scan_run_id"] == scan_run_id
     assert "added_resources" in payload
+
+
+def test_api_account_summary_endpoint() -> None:
+    scan_run_id = _seed_scan()
+    client = TestClient(create_api_app())
+
+    response = client.get("/accounts/summary", params={"scan_run_id": scan_run_id})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload) == 1
+    assert payload[0]["account_id"] == "123456789012"
