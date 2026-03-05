@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     aws_regions: str = "us-west-2,us-east-1"
     output_dir: Path = Path(".aai-output")
     idle_days: int = 30
+    aws_region_concurrency: int = 4
+    aws_retry_attempts: int = 3
+    aws_retry_base_delay_ms: int = 50
 
     @property
     def region_list(self) -> list[str]:

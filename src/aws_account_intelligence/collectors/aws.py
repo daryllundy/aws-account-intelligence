@@ -1,18 +1,19 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, date, datetime, timedelta
-from typing import Any
+from time import sleep
+from typing import Any, Callable
 
 import boto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
-from aws_account_intelligence.collectors.base import CollectorError, DiscoveryBundle
+from aws_account_intelligence.collectors.base import CollectorError, DiscoveryBundle, ScanWarning
 from aws_account_intelligence.config import Settings, get_settings
 from aws_account_intelligence.models import AttributionMethod, CostAttribution, CostPoint, ResourceStatus, ServiceRecord
 
 
-SUPPORTED_SERVICES = {"ec2", "rds", "lambda", "s3", "sqs", "sns", "apigateway"}
 SERVICE_LABELS = {
     "Amazon Elastic Compute Cloud - Compute": "ec2",
     "Amazon Relational Database Service": "rds",
@@ -22,6 +23,15 @@ SERVICE_LABELS = {
     "Amazon Simple Notification Service": "sns",
     "Amazon API Gateway": "apigateway",
 }
+THROTTLE_CODES = {
+    "Throttled",
+    "Throttling",
+    "ThrottlingException",
+    "RequestLimitExceeded",
+    "TooManyRequestsException",
+    "ProvisionedThroughputExceededException",
+}
+TRANSIENT_CODES = {"InternalError", "ServiceUnavailable", "ServiceUnavailableException", "RequestTimeout"}
 
 
 class AwsCollector:
@@ -29,34 +39,88 @@ class AwsCollector:
         self.settings = settings or get_settings()
         self.session = session or boto3.session.Session()
         self._account_id: str | None = None
+        self._regional_collectors: list[tuple[str, Callable[[str, str, str], list[ServiceRecord]]]] = [
+            ("ec2", self._collect_ec2),
+            ("rds", self._collect_rds),
+            ("lambda", self._collect_lambda),
+            ("sqs", self._collect_sqs),
+            ("sns", self._collect_sns),
+            ("apigateway", self._collect_apigateway),
+        ]
 
     def load(self, scan_run_id: str) -> DiscoveryBundle:
         try:
-            services = self._discover_services(scan_run_id)
+            services, warnings = self._discover_services(scan_run_id)
             services = self._enrich_relationship_metadata(services)
-            costs = self._collect_costs(scan_run_id, services)
+            costs, cost_warnings = self._collect_costs(scan_run_id, services)
+            warnings.extend(cost_warnings)
         except ClientError as exc:
             message = exc.response.get("Error", {}).get("Message", str(exc))
             raise CollectorError(f"AWS collection failed: {message}") from exc
-        except Exception as exc:  # pragma: no cover - defensive wrapper around boto errors
+        except Exception as exc:  # pragma: no cover
             raise CollectorError(f"AWS collection failed: {exc}") from exc
-        return DiscoveryBundle(services=services, costs=costs, warnings=[])
+        return DiscoveryBundle(services=services, costs=costs, warnings=warnings)
 
-    def _discover_services(self, scan_run_id: str) -> list[ServiceRecord]:
+    def _discover_services(self, scan_run_id: str) -> tuple[list[ServiceRecord], list[ScanWarning]]:
         account_id = self._get_account_id()
-        discovered: list[ServiceRecord] = []
-        for region in self.settings.region_list:
-            regional = [
-                *self._guarded_collect(self._collect_ec2, scan_run_id, account_id, region),
-                *self._guarded_collect(self._collect_rds, scan_run_id, account_id, region),
-                *self._guarded_collect(self._collect_lambda, scan_run_id, account_id, region),
-                *self._guarded_collect(self._collect_sqs, scan_run_id, account_id, region),
-                *self._guarded_collect(self._collect_sns, scan_run_id, account_id, region),
-                *self._guarded_collect(self._collect_apigateway, scan_run_id, account_id, region),
+        services: list[ServiceRecord] = []
+        warnings: list[ScanWarning] = []
+
+        max_workers = max(1, min(len(self.settings.region_list), self.settings.aws_region_concurrency))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(self._collect_region, scan_run_id, account_id, region): region for region in self.settings.region_list
+            }
+            for future in as_completed(futures):
+                region_services, region_warnings = future.result()
+                services.extend(region_services)
+                warnings.extend(region_warnings)
+
+        s3_services, s3_warnings = self._guarded_collect("s3", "global", lambda: self._collect_s3(scan_run_id, account_id))
+        services.extend(s3_services)
+        warnings.extend(s3_warnings)
+        return services, warnings
+
+    def _collect_region(self, scan_run_id: str, account_id: str, region: str) -> tuple[list[ServiceRecord], list[ScanWarning]]:
+        region_services: list[ServiceRecord] = []
+        region_warnings: list[ScanWarning] = []
+        for service_name, collector in self._regional_collectors:
+            records, warnings = self._guarded_collect(service_name, region, lambda c=collector: c(scan_run_id, account_id, region))
+            region_services.extend(records)
+            region_warnings.extend(warnings)
+        return region_services, region_warnings
+
+    def _guarded_collect(
+        self,
+        service_name: str,
+        region: str,
+        func: Callable[[], list[ServiceRecord]],
+    ) -> tuple[list[ServiceRecord], list[ScanWarning]]:
+        try:
+            return self._run_with_retries(func), []
+        except ClientError as exc:
+            return [], [self._warning("discovery", service_name, region, exc)]
+        except BotoCoreError as exc:
+            return [], [
+                ScanWarning(
+                    stage="discovery",
+                    service=service_name,
+                    region=region,
+                    code=type(exc).__name__.upper(),
+                    message=str(exc),
+                )
             ]
-            discovered.extend(regional)
-        discovered.extend(self._guarded_collect(self._collect_s3, scan_run_id, account_id))
-        return discovered
+
+    def _run_with_retries(self, func: Callable[[], list[ServiceRecord] | list[CostAttribution] | dict[str, Any]]) -> Any:
+        attempt = 0
+        while True:
+            try:
+                return func()
+            except ClientError as exc:
+                attempt += 1
+                if attempt >= self.settings.aws_retry_attempts or not _is_retryable(exc):
+                    raise
+                sleep(self.settings.aws_retry_base_delay_ms / 1000 * (2 ** (attempt - 1)))
 
     def _collect_ec2(self, scan_run_id: str, account_id: str, region: str) -> list[ServiceRecord]:
         client = self.session.client("ec2", region_name=region)
@@ -283,34 +347,34 @@ class AwsCollector:
                 break
         return records
 
-    def _collect_costs(self, scan_run_id: str, services: list[ServiceRecord]) -> list[CostAttribution]:
+    def _collect_costs(self, scan_run_id: str, services: list[ServiceRecord]) -> tuple[list[CostAttribution], list[ScanWarning]]:
         try:
             cost_client = self.session.client("ce", region_name="us-east-1")
             end_date = date.today()
             start_date = end_date - timedelta(days=30)
-            results = cost_client.get_cost_and_usage_with_resources(
-                TimePeriod={"Start": start_date.isoformat(), "End": end_date.isoformat()},
-                Granularity="DAILY",
-                Metrics=["UnblendedCost"],
-                GroupBy=[{"Type": "DIMENSION", "Key": "RESOURCE_ID"}, {"Type": "DIMENSION", "Key": "SERVICE"}],
-                Filter={
-                    "Dimensions": {
-                        "Key": "SERVICE",
-                        "Values": list(SERVICE_LABELS.keys()),
-                    }
-                },
-            )
-            return _build_cost_attributions(scan_run_id, services, results)
-        except ClientError:
-            return [
-                CostAttribution(
-                    resource_id=service.resource_id,
-                    scan_run_id=scan_run_id,
-                    attribution_method=AttributionMethod.UNATTRIBUTED,
-                    confidence=0.0,
+            results = self._run_with_retries(
+                lambda: cost_client.get_cost_and_usage_with_resources(
+                    TimePeriod={"Start": start_date.isoformat(), "End": end_date.isoformat()},
+                    Granularity="DAILY",
+                    Metrics=["UnblendedCost"],
+                    GroupBy=[{"Type": "DIMENSION", "Key": "RESOURCE_ID"}, {"Type": "DIMENSION", "Key": "SERVICE"}],
+                    Filter={"Dimensions": {"Key": "SERVICE", "Values": list(SERVICE_LABELS.keys())}},
                 )
-                for service in services
-            ]
+            )
+            return _build_cost_attributions(scan_run_id, services, results), []
+        except ClientError as exc:
+            return (
+                [
+                    CostAttribution(
+                        resource_id=service.resource_id,
+                        scan_run_id=scan_run_id,
+                        attribution_method=AttributionMethod.UNATTRIBUTED,
+                        confidence=0.0,
+                    )
+                    for service in services
+                ],
+                [self._warning("cost_attribution", "ce", "us-east-1", exc)],
+            )
 
     def _lambda_event_sources(self, client) -> dict[str, list[str]]:
         mapping: dict[str, list[str]] = defaultdict(list)
@@ -365,11 +429,15 @@ class AwsCollector:
             self._account_id = sts.get_caller_identity()["Account"]
         return self._account_id
 
-    def _guarded_collect(self, func, *args) -> list[ServiceRecord]:
-        try:
-            return func(*args)
-        except ClientError:
-            return []
+    def _warning(self, stage: str, service: str, region: str, exc: ClientError) -> ScanWarning:
+        error = exc.response.get("Error", {})
+        return ScanWarning(
+            stage=stage,
+            service=service,
+            region=region,
+            code=error.get("Code", "UNKNOWN"),
+            message=error.get("Message", str(exc)),
+        )
 
 
 def _build_cost_attributions(scan_run_id: str, services: list[ServiceRecord], ce_response: dict[str, Any]) -> list[CostAttribution]:
@@ -522,3 +590,8 @@ def _s3_tags(client, bucket_name: str) -> dict[str, str]:
 def _sns_tags(client, arn: str) -> dict[str, str]:
     response = client.list_tags_for_resource(ResourceArn=arn)
     return {item["Key"]: item["Value"] for item in response.get("Tags", [])}
+
+
+def _is_retryable(exc: ClientError) -> bool:
+    code = exc.response.get("Error", {}).get("Code", "")
+    return code in THROTTLE_CODES or code in TRANSIENT_CODES
