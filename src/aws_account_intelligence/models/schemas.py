@@ -132,4 +132,4 @@ class IamValidationResult(BaseModel):
     ok: bool
     checked_permissions: list[str]
     missing_permissions: list[str]
-    details: dict[str, str] = Field(default_factory=dict)
+    details: dict[str, Any] = Field(default_factory=dict)

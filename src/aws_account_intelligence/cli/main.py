@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from aws_account_intelligence.analysis.dependency_graph import DependencyGraphBuilder
 from aws_account_intelligence.analysis.impact import ImpactAnalyzer
 from aws_account_intelligence.config import get_settings
+from aws_account_intelligence.iam_validation import IamValidator
 from aws_account_intelligence.models import IamValidationResult
 from aws_account_intelligence.pipeline import ScanPipeline
 from aws_account_intelligence.storage import Database
@@ -179,19 +180,7 @@ def impact_analyze(
 
 @iam_app.command("validate")
 def iam_validate(output: str = "json") -> None:
-    result = IamValidationResult(
-        ok=False,
-        checked_permissions=[
-            "tag:GetResources",
-            "config:Describe*",
-            "config:List*",
-            "ce:GetCostAndUsage",
-            "ec2:Describe*",
-            "cloudtrail:LookupEvents",
-        ],
-        missing_permissions=["Live AWS validation not implemented in v0.1.0"],
-        details={"note": "This command currently validates the expected IAM contract, not active AWS credentials."},
-    )
+    result: IamValidationResult = IamValidator().validate()
     _emit(result.model_dump(mode="json"), output)
 
 
