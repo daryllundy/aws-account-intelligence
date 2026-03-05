@@ -220,7 +220,7 @@ class FakeEksClient:
         return {"clusters": [f"orders-{self.region_name}"]}
 
     def describe_cluster(self, name):
-        return {"cluster": {"arn": f"arn:aws:eks:{self.region_name}:123456789012:cluster/{name}", "name": name, "version": "1.31", "roleArn": "arn:aws:iam::123456789012:role/eks-cluster", "status": "ACTIVE", "tags": {"Environment": "runtime"}, "resourcesVpcConfig": {"vpcId": "vpc-main", "securityGroupIds": ["sg-eks"], "subnetIds": ["subnet-app", "subnet-data"]}}}
+        return {"cluster": {"arn": f"arn:aws:eks:{self.region_name}:123456789012:cluster/{name}", "name": name, "version": "1.31", "roleArn": "arn:aws:iam::123456789012:role/orders-lambda-role", "status": "ACTIVE", "tags": {"Environment": "runtime"}, "resourcesVpcConfig": {"vpcId": "vpc-main", "securityGroupIds": ["sg-eks"], "subnetIds": ["subnet-app", "subnet-data"]}}}
 
 
 class FakeElastiCacheClient:
@@ -263,6 +263,22 @@ class FakeCloudWatchClient:
             ("AWS/CloudFront", "Requests", (("DistributionId", "DIST123"), ("Region", "Global"))): [{"Sum": 7.0}],
         }
         return {"Datapoints": datapoints.get(key, [])}
+
+
+class FakeConfigClient:
+    def __init__(self, region_name: str | None = None, counters=None, failures=None):
+        self.region_name = region_name
+
+    def batch_get_resource_config(self, resourceKeys):
+        key = resourceKeys[0]
+        resource_type = key["resourceType"]
+        resource_id = key["resourceId"]
+        relationships = []
+        if resource_type == "AWS::Lambda::Function" and resource_id == "process-orders-us-west-2":
+            relationships = [{"resourceId": "orders-db-us-west-2"}]
+        if resource_type == "AWS::EKS::Cluster" and resource_id == "orders-us-west-2":
+            relationships = [{"resourceId": "orders-cache-us-west-2"}]
+        return {"baseConfigurationItems": [{"relationships": relationships}]}
 
 
 class FakeCeClient:
@@ -317,6 +333,7 @@ class FakeSession:
             "elasticache": FakeElastiCacheClient,
             "cloudfront": FakeCloudFrontClient,
             "cloudwatch": FakeCloudWatchClient,
+            "config": FakeConfigClient,
             "ce": FakeCeClient,
         }
         return mapping[service_name](region_name=region_name, counters=self.counters, failures=self.failures)

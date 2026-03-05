@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from aws_account_intelligence.analysis.impact import ImpactAnalyzer
 from aws_account_intelligence.collectors.fixtures import FixtureCollector
+from aws_account_intelligence.collectors.aws import AwsCollector
 from aws_account_intelligence.analysis.dependency_graph import DependencyGraphBuilder
-from aws_account_intelligence.models import RiskLevel
+from aws_account_intelligence.models import EdgeType, RiskLevel
+from aws_account_intelligence.config import Settings
+from tests.test_aws_collector import FakeSession
 
 
 def test_impact_analysis_flags_lambda_shutdown_risk() -> None:
@@ -40,3 +43,23 @@ def test_impact_analysis_low_risk_for_isolated_bucket() -> None:
 
     assert report.risk_score is RiskLevel.LOW
     assert report.direct_dependents == []
+
+
+def test_dependency_graph_includes_config_and_iam_edges_from_live_collector_metadata() -> None:
+    settings = Settings(DATABASE_URL="sqlite+pysqlite:///:memory:", data_source="aws", aws_regions="us-west-2")
+    bundle = AwsCollector(settings=settings, session=FakeSession()).load("scan-aws-deps")
+
+    edges = DependencyGraphBuilder().build(bundle.services, "scan-aws-deps")
+
+    assert any(
+        edge.edge_type is EdgeType.CONFIG
+        and edge.from_resource_id.endswith("process-orders-us-west-2")
+        and edge.to_resource_id.endswith("orders-db-us-west-2")
+        for edge in edges
+    )
+    assert any(
+        edge.edge_type is EdgeType.IAM
+        and edge.from_resource_id.endswith("process-orders-us-west-2")
+        and edge.to_resource_id.endswith("cluster/orders-us-west-2")
+        for edge in edges
+    )

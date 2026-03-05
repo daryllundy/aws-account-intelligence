@@ -75,6 +75,8 @@ class AwsCollector:
             warnings = [*tag_warnings, *warnings]
             services = self._enrich_relationship_metadata(services)
             services = self._add_tagging_only_resources(scan_run_id, services, tag_inventory)
+            config_warnings = self._enrich_config_relationships(services)
+            warnings.extend(config_warnings)
             services, activity_warnings = self._classify_activity(services)
             warnings.extend(activity_warnings)
             costs, cost_warnings = self._collect_costs(scan_run_id, services)
@@ -724,6 +726,47 @@ class AwsCollector:
                     downstream.metadata.setdefault("subscriptions", []).append(service.resource_id)
         return services
 
+    def _enrich_config_relationships(self, services: list[ServiceRecord]) -> list[ScanWarning]:
+        warnings: list[ScanWarning] = []
+        by_region: dict[str, list[ServiceRecord]] = defaultdict(list)
+        for service in services:
+            if service.region == "global":
+                continue
+            by_region[service.region].append(service)
+
+        for region, regional_services in by_region.items():
+            client = self.session.client("config", region_name=region)
+            for service in regional_services:
+                key = _config_resource_key(service)
+                if key is None:
+                    continue
+                try:
+                    response = self._run_with_retries(lambda k=key: client.batch_get_resource_config(resourceKeys=[k]))
+                except ClientError as exc:
+                    warnings.append(self._warning("config_relationships", service.service_name, region, exc))
+                    continue
+                except BotoCoreError as exc:
+                    warnings.append(
+                        ScanWarning(
+                            stage="config_relationships",
+                            service=service.service_name,
+                            region=region,
+                            code=type(exc).__name__.upper(),
+                            message=str(exc),
+                        )
+                    )
+                    continue
+
+                related_resources = []
+                for item in response.get("baseConfigurationItems", []):
+                    for relationship in item.get("relationships", []):
+                        target = _config_relationship_target(relationship)
+                        if target:
+                            related_resources.append(target)
+                if related_resources:
+                    service.metadata["config_related_resources"] = sorted(set(related_resources))
+        return warnings
+
     def _merged_tags(self, arn: str, tag_index: dict[str, dict[str, Any]], fallback_tags: dict[str, str]) -> dict[str, str]:
         tagging_tags = (tag_index.get(arn) or {}).get("tags", {})
         return {**fallback_tags, **tagging_tags}
@@ -1255,3 +1298,39 @@ def _region_from_arn(arn: str, fallback: str) -> str:
     if len(parts) > 3 and parts[3]:
         return parts[3]
     return fallback
+
+
+def _config_resource_key(service: ServiceRecord) -> dict[str, str] | None:
+    resource_type = {
+        "ec2": "AWS::EC2::Instance",
+        "rds": "AWS::RDS::DBInstance",
+        "lambda": "AWS::Lambda::Function",
+        "sqs": "AWS::SQS::Queue",
+        "sns": "AWS::SNS::Topic",
+        "apigateway": "AWS::ApiGateway::RestApi",
+        "ecs": "AWS::ECS::Cluster",
+        "eks": "AWS::EKS::Cluster",
+        "elasticache": "AWS::ElastiCache::CacheCluster",
+    }.get(service.service_name)
+    if not resource_type:
+        return None
+
+    resource_id = (
+        service.metadata.get("instance_id")
+        or service.metadata.get("db_instance_identifier")
+        or service.metadata.get("function_name")
+        or service.metadata.get("queue_name")
+        or service.metadata.get("topic_name")
+        or service.metadata.get("api_id")
+        or service.metadata.get("cluster_name")
+        or service.metadata.get("cache_cluster_id")
+    )
+    if not resource_id:
+        return None
+    return {"resourceType": resource_type, "resourceId": resource_id}
+
+
+def _config_relationship_target(relationship: dict[str, Any]) -> str | None:
+    resource_id = relationship.get("resourceId")
+    resource_name = relationship.get("resourceName")
+    return resource_id or resource_name

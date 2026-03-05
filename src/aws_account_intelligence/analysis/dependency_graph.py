@@ -53,8 +53,23 @@ class DependencyGraphBuilder:
                             rationale="Queue depends on the upstream SNS topic that fans out messages.",
                         )
                     )
+            for related in metadata.get("config_related_resources", []):
+                target = _resolve_target_resource_id(related, by_id)
+                if target:
+                    edges.append(
+                        DependencyEdge(
+                            from_resource_id=service.resource_id,
+                            to_resource_id=target,
+                            scan_run_id=scan_run_id,
+                            edge_type=EdgeType.CONFIG,
+                            evidence_source="aws_config.relationship",
+                            confidence=0.84,
+                            rationale="AWS Config reported a resource relationship between these resources.",
+                        )
+                    )
 
         edges.extend(self._infer_network_edges(services, scan_run_id))
+        edges.extend(self._infer_iam_edges(services, scan_run_id))
         return _dedupe(edges)
 
     def export(self, scan, edges: list[DependencyEdge]) -> GraphExportResponse:
@@ -100,6 +115,54 @@ class DependencyGraphBuilder:
                             )
                         )
         return edges
+
+    def _infer_iam_edges(self, services: list[ServiceRecord], scan_run_id: str) -> list[DependencyEdge]:
+        role_index: dict[str, list[ServiceRecord]] = defaultdict(list)
+        for service in services:
+            role_arn = service.metadata.get("execution_role") or service.metadata.get("role_arn")
+            if role_arn:
+                role_index[role_arn].append(service)
+
+        edges: list[DependencyEdge] = []
+        for role_arn, bound_services in role_index.items():
+            if len(bound_services) < 2:
+                continue
+            for source in bound_services:
+                for target in bound_services:
+                    if source.resource_id == target.resource_id:
+                        continue
+                    edges.append(
+                        DependencyEdge(
+                            from_resource_id=source.resource_id,
+                            to_resource_id=target.resource_id,
+                            scan_run_id=scan_run_id,
+                            edge_type=EdgeType.IAM,
+                            evidence_source="iam.shared_role_binding",
+                            confidence=0.6,
+                            rationale=f"Resources share IAM role binding {role_arn}.",
+                        )
+                    )
+        return edges
+
+
+def _resolve_target_resource_id(related: str, by_id: dict[str, ServiceRecord]) -> str | None:
+    if related in by_id:
+        return related
+    for resource_id, service in by_id.items():
+        if related in {
+            resource_id,
+            service.arn,
+            service.metadata.get("instance_id"),
+            service.metadata.get("db_instance_identifier"),
+            service.metadata.get("function_name"),
+            service.metadata.get("queue_name"),
+            service.metadata.get("topic_name"),
+            service.metadata.get("api_id"),
+            service.metadata.get("cluster_name"),
+            service.metadata.get("cache_cluster_id"),
+        }:
+            return resource_id
+    return None
 
 
 def _dedupe(edges: list[DependencyEdge]) -> list[DependencyEdge]:
