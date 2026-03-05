@@ -132,6 +132,8 @@ class CostSummaryResponse(BaseModel):
     total_projected_monthly_cost_usd: float
     unattributed_cost_usd: float
     cost_freshness_at: datetime | None = None
+    cost_freshness_age_hours: float | None = None
+    cost_freshness_status: Literal["FRESH", "STALE", "UNKNOWN"] = "UNKNOWN"
     costs: list[CostAttribution]
 
 

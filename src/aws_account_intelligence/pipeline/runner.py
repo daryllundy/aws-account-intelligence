@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from time import perf_counter
 from uuid import uuid4
 
+from aws_account_intelligence.audit import AuditLogger
 from aws_account_intelligence.analysis.dependency_graph import DependencyGraphBuilder
 from aws_account_intelligence.collectors.factory import get_collector
 from aws_account_intelligence.config import Settings
@@ -23,6 +25,7 @@ class ScanPipeline:
         self.settings = settings
         self.database = database
         self.graph_builder = DependencyGraphBuilder()
+        self.audit = AuditLogger(settings.output_dir)
 
     def run(self) -> ScanRun:
         scan_run = ScanRun(
@@ -33,6 +36,14 @@ class ScanPipeline:
             regions=self.settings.region_list,
         )
         self.database.upsert_scan_run(scan_run)
+        self.audit.emit(
+            "scan_run_started",
+            {
+                "scan_run_id": scan_run.scan_run_id,
+                "data_source": scan_run.data_source,
+                "regions": scan_run.regions,
+            },
+        )
         baseline_scan = self.database.get_latest_completed_scan_run(exclude_scan_run_id=scan_run.scan_run_id)
 
         collector = get_collector(self.settings.data_source)
@@ -71,6 +82,16 @@ class ScanPipeline:
             },
         }
         self.database.upsert_scan_run(scan_run)
+        self.audit.emit(
+            "scan_run_completed",
+            {
+                "scan_run_id": scan_run.scan_run_id,
+                "resource_count": scan_run.resource_count,
+                "edge_count": scan_run.edge_count,
+                "warning_count": scan_run.summary["warning_count"],
+                "delta": scan_run.summary["delta"],
+            },
+        )
         return scan_run
 
     def inventory(self, scan_run_id: str) -> InventoryListResponse:
@@ -87,6 +108,8 @@ class ScanPipeline:
             total_projected_monthly_cost_usd=round(sum(cost.projected_monthly_cost_usd for cost in costs), 2),
             unattributed_cost_usd=round(unattributed, 2),
             cost_freshness_at=scan.completed_at,
+            cost_freshness_age_hours=_freshness_age_hours(scan.completed_at),
+            cost_freshness_status=_freshness_status(scan.completed_at),
             costs=costs,
         )
 
@@ -136,6 +159,22 @@ class ScanPipeline:
                 }
             )
         return results
+
+    def benchmark(self, runs: int = 3) -> dict[str, object]:
+        durations = []
+        for _ in range(runs):
+            started = perf_counter()
+            scan = self.run()
+            durations.append(round(perf_counter() - started, 4))
+        report = {
+            "runs": runs,
+            "durations_seconds": durations,
+            "avg_duration_seconds": round(sum(durations) / len(durations), 4) if durations else 0.0,
+            "max_duration_seconds": max(durations) if durations else 0.0,
+            "latest_scan_run_id": scan.scan_run_id if durations else None,
+        }
+        self.audit.emit("scan_benchmark_completed", report)
+        return report
 
     def _build_delta_report(
         self,
@@ -211,3 +250,18 @@ def _count_by(items: list, key):
         name = key(item)
         counts[name] = counts.get(name, 0) + 1
     return counts
+
+
+def _freshness_age_hours(completed_at: datetime | None) -> float | None:
+    if completed_at is None:
+        return None
+    return round((datetime.now(UTC) - completed_at).total_seconds() / 3600, 2)
+
+
+def _freshness_status(completed_at: datetime | None) -> str:
+    age_hours = _freshness_age_hours(completed_at)
+    if age_hours is None:
+        return "UNKNOWN"
+    if age_hours <= 24:
+        return "FRESH"
+    return "STALE"

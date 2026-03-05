@@ -149,3 +149,12 @@ def test_cli_account_summary() -> None:
     assert summary_result.exit_code == 0, summary_result.stdout
     payload = json.loads(summary_result.stdout)
     assert payload[0]["account_id"] == "123456789012"
+
+
+def test_cli_scan_benchmark() -> None:
+    result = runner.invoke(app, ["scan", "benchmark", "--runs", "2", "--output", "json"])
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["runs"] == 2
+    assert len(payload["durations_seconds"]) == 2

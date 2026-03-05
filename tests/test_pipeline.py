@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+import json
 
 from aws_account_intelligence.config import get_settings
 from aws_account_intelligence.collectors.base import DiscoveryBundle, ScanWarning
@@ -29,6 +30,14 @@ def test_scan_pipeline_persists_snapshot() -> None:
     assert scan.summary["warning_count"] == 0
     cost_summary = pipeline.costs(scan.scan_run_id)
     assert cost_summary.cost_freshness_at is not None
+    assert cost_summary.cost_freshness_status == "FRESH"
+    assert cost_summary.cost_freshness_age_hours is not None
+
+    audit_files = list((settings.output_dir / "audit").glob("*.jsonl"))
+    assert audit_files
+    records = [json.loads(line) for line in audit_files[0].read_text().splitlines()]
+    assert any(record["event_type"] == "scan_run_started" for record in records)
+    assert any(record["event_type"] == "scan_run_completed" for record in records)
 
 
 def test_scan_pipeline_persists_structured_warnings(monkeypatch) -> None:
@@ -199,3 +208,18 @@ def test_run_due_schedules_executes_pending_schedule() -> None:
     assert len(results) == 1
     assert results[0]["name"] == "nightly"
     assert schedules[0].last_run_at is not None
+
+
+def test_scan_pipeline_benchmark_writes_audit_record() -> None:
+    settings = get_settings()
+    database = Database(settings.database_url)
+    database.create_all()
+    pipeline = ScanPipeline(settings, database)
+
+    report = pipeline.benchmark(runs=2)
+
+    assert report["runs"] == 2
+    assert len(report["durations_seconds"]) == 2
+    audit_files = list((settings.output_dir / "audit").glob("*.jsonl"))
+    records = [json.loads(line) for line in audit_files[0].read_text().splitlines()]
+    assert any(record["event_type"] == "scan_benchmark_completed" for record in records)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from fastapi.testclient import TestClient
 
 from aws_account_intelligence.cli.main import create_api_app
@@ -123,3 +124,16 @@ def test_api_account_summary_endpoint() -> None:
     payload = response.json()
     assert len(payload) == 1
     assert payload[0]["account_id"] == "123456789012"
+
+
+def test_api_requests_are_audited() -> None:
+    _seed_scan()
+    client = TestClient(create_api_app())
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    audit_files = list((get_settings().output_dir / "audit").glob("*.jsonl"))
+    assert audit_files
+    records = [json.loads(line) for line in audit_files[0].read_text().splitlines()]
+    assert any(record["event_type"] == "api_request" and record["path"] == "/health" for record in records)

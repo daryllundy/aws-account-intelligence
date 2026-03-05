@@ -3,13 +3,15 @@ from __future__ import annotations
 import csv
 import json
 from pathlib import Path
+from time import perf_counter
 from typing import Annotated
 
 import typer
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.responses import JSONResponse
 
+from aws_account_intelligence.audit import AuditLogger
 from aws_account_intelligence.analysis.dependency_graph import DependencyGraphBuilder
 from aws_account_intelligence.analysis.impact import ImpactAnalyzer
 from aws_account_intelligence.config import get_settings
@@ -125,6 +127,13 @@ def scan_run(output: str = "json") -> None:
     _, pipeline = _services()
     scan = pipeline.run()
     _emit(scan.model_dump(mode="json"), output)
+
+
+@scan_app.command("benchmark")
+def scan_benchmark(runs: int = 3, output: str = "json") -> None:
+    _, pipeline = _services()
+    report = pipeline.benchmark(runs=runs)
+    _emit(report, output)
 
 
 @scan_app.command("status")
@@ -294,6 +303,23 @@ def api_serve(host: str = "127.0.0.1", port: int = 8000) -> None:
 
 def create_api_app() -> FastAPI:
     api = FastAPI(title="AWS Account Intelligence API", version="0.1.0")
+    audit = AuditLogger(get_settings().output_dir)
+
+    @api.middleware("http")
+    async def audit_requests(request: Request, call_next):
+        started = perf_counter()
+        response = await call_next(request)
+        audit.emit(
+            "api_request",
+            {
+                "method": request.method,
+                "path": request.url.path,
+                "query": dict(request.query_params),
+                "status_code": response.status_code,
+                "duration_ms": round((perf_counter() - started) * 1000, 2),
+            },
+        )
+        return response
 
     @api.get("/health")
     def health() -> dict[str, str]:
