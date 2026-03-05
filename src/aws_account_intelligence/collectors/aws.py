@@ -75,6 +75,8 @@ class AwsCollector:
             warnings = [*tag_warnings, *warnings]
             services = self._enrich_relationship_metadata(services)
             services = self._add_tagging_only_resources(scan_run_id, services, tag_inventory)
+            services, activity_warnings = self._classify_activity(services)
+            warnings.extend(activity_warnings)
             costs, cost_warnings = self._collect_costs(scan_run_id, services)
             warnings.extend(cost_warnings)
         except ClientError as exc:
@@ -135,6 +137,27 @@ class AwsCollector:
         )
         services.extend(cloudfront_services)
         warnings.extend(cloudfront_warnings)
+        return services, warnings
+
+    def _classify_activity(self, services: list[ServiceRecord]) -> tuple[list[ServiceRecord], list[ScanWarning]]:
+        warnings: list[ScanWarning] = []
+        for service in services:
+            try:
+                service.status = self._activity_status(service)
+            except ClientError as exc:
+                service.status = ResourceStatus.UNKNOWN
+                warnings.append(self._warning("activity_classification", service.service_name, service.region, exc))
+            except BotoCoreError as exc:
+                service.status = ResourceStatus.UNKNOWN
+                warnings.append(
+                    ScanWarning(
+                        stage="activity_classification",
+                        service=service.service_name,
+                        region=service.region,
+                        code=type(exc).__name__.upper(),
+                        message=str(exc),
+                    )
+                )
         return services, warnings
 
     def _collect_region(
@@ -720,6 +743,137 @@ class AwsCollector:
             code=error.get("Code", "UNKNOWN"),
             message=error.get("Message", str(exc)),
         )
+
+    def _activity_status(self, service: ServiceRecord) -> ResourceStatus:
+        service_name = service.service_name
+        if service_name == "s3":
+            return ResourceStatus.UNKNOWN
+        if service_name == "eks":
+            return ResourceStatus.UNKNOWN
+        if service_name == "ecs":
+            return ResourceStatus.ACTIVE if service.metadata.get("running_tasks_count", 0) > 0 else ResourceStatus.IDLE
+
+        metric = self._activity_metric(service)
+        if metric is None:
+            return ResourceStatus.UNKNOWN
+        datapoints = self._metric_datapoints(service.region, metric["namespace"], metric["name"], metric["dimensions"], metric["stat"])
+        if not datapoints:
+            return ResourceStatus.IDLE
+        return ResourceStatus.ACTIVE if any(point > 0 for point in datapoints) else ResourceStatus.IDLE
+
+    def _activity_metric(self, service: ServiceRecord) -> dict[str, Any] | None:
+        if service.service_name == "ec2":
+            instance_id = service.metadata.get("instance_id")
+            if not instance_id:
+                return None
+            return {
+                "namespace": "AWS/EC2",
+                "name": "CPUUtilization",
+                "dimensions": [{"Name": "InstanceId", "Value": instance_id}],
+                "stat": "Average",
+            }
+        if service.service_name == "rds":
+            db_instance_identifier = service.metadata.get("db_instance_identifier")
+            if not db_instance_identifier:
+                return None
+            return {
+                "namespace": "AWS/RDS",
+                "name": "DatabaseConnections",
+                "dimensions": [{"Name": "DBInstanceIdentifier", "Value": db_instance_identifier}],
+                "stat": "Maximum",
+            }
+        if service.service_name == "lambda":
+            function_name = service.metadata.get("function_name")
+            if not function_name:
+                return None
+            return {
+                "namespace": "AWS/Lambda",
+                "name": "Invocations",
+                "dimensions": [{"Name": "FunctionName", "Value": function_name}],
+                "stat": "Sum",
+            }
+        if service.service_name == "sqs":
+            queue_name = service.metadata.get("queue_name")
+            if not queue_name:
+                return None
+            return {
+                "namespace": "AWS/SQS",
+                "name": "NumberOfMessagesSent",
+                "dimensions": [{"Name": "QueueName", "Value": queue_name}],
+                "stat": "Sum",
+            }
+        if service.service_name == "sns":
+            topic_name = service.metadata.get("topic_name")
+            if not topic_name:
+                return None
+            return {
+                "namespace": "AWS/SNS",
+                "name": "NumberOfMessagesPublished",
+                "dimensions": [{"Name": "TopicName", "Value": topic_name}],
+                "stat": "Sum",
+            }
+        if service.service_name == "apigateway":
+            api_name = service.metadata.get("api_name")
+            if not api_name:
+                return None
+            return {
+                "namespace": "AWS/ApiGateway",
+                "name": "Count",
+                "dimensions": [{"Name": "ApiName", "Value": api_name}],
+                "stat": "Sum",
+            }
+        if service.service_name == "elasticache":
+            cache_cluster_id = service.metadata.get("cache_cluster_id")
+            if not cache_cluster_id:
+                return None
+            return {
+                "namespace": "AWS/ElastiCache",
+                "name": "CurrConnections",
+                "dimensions": [{"Name": "CacheClusterId", "Value": cache_cluster_id}],
+                "stat": "Maximum",
+            }
+        if service.service_name == "cloudfront":
+            distribution_id = service.metadata.get("distribution_id")
+            if not distribution_id:
+                return None
+            return {
+                "namespace": "AWS/CloudFront",
+                "name": "Requests",
+                "dimensions": [
+                    {"Name": "DistributionId", "Value": distribution_id},
+                    {"Name": "Region", "Value": "Global"},
+                ],
+                "stat": "Sum",
+            }
+        return None
+
+    def _metric_datapoints(
+        self,
+        region: str,
+        namespace: str,
+        metric_name: str,
+        dimensions: list[dict[str, str]],
+        stat: str,
+    ) -> list[float]:
+        cloudwatch_region = "us-east-1" if region == "global" else region
+        client = self.session.client("cloudwatch", region_name=cloudwatch_region)
+        now = datetime.now(UTC)
+        start = now - timedelta(days=self.settings.idle_days)
+        response = client.get_metric_statistics(
+            Namespace=namespace,
+            MetricName=metric_name,
+            Dimensions=dimensions,
+            StartTime=start,
+            EndTime=now,
+            Period=86400,
+            Statistics=[stat],
+        )
+        datapoints = []
+        for point in response.get("Datapoints", []):
+            value = point.get(stat)
+            if value is not None:
+                datapoints.append(float(value))
+        return datapoints
 
 
 def _build_cost_attributions(scan_run_id: str, services: list[ServiceRecord], ce_response: dict[str, Any]) -> list[CostAttribution]:

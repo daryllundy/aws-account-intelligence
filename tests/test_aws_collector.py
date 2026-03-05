@@ -246,6 +246,25 @@ class FakeCloudFrontClient:
         return {"Tags": {"Items": [{"Key": "Environment", "Value": "runtime"}]}}
 
 
+class FakeCloudWatchClient:
+    def __init__(self, region_name: str | None = None, counters=None, failures=None):
+        self.region_name = region_name
+
+    def get_metric_statistics(self, Namespace, MetricName, Dimensions, StartTime, EndTime, Period, Statistics):
+        key = (Namespace, MetricName, tuple((item["Name"], item["Value"]) for item in Dimensions))
+        datapoints = {
+            ("AWS/EC2", "CPUUtilization", (("InstanceId", "i-us-west-2"),)): [{"Average": 3.0}],
+            ("AWS/RDS", "DatabaseConnections", (("DBInstanceIdentifier", "orders-db-us-west-2"),)): [{"Maximum": 1.0}],
+            ("AWS/Lambda", "Invocations", (("FunctionName", "process-orders-us-west-2"),)): [{"Sum": 12.0}],
+            ("AWS/SQS", "NumberOfMessagesSent", (("QueueName", "orders-queue-us-west-2"),)): [{"Sum": 0.0}],
+            ("AWS/SNS", "NumberOfMessagesPublished", (("TopicName", "orders-topic-us-west-2"),)): [{"Sum": 0.0}],
+            ("AWS/ApiGateway", "Count", (("ApiName", "orders-api"),)): [{"Sum": 5.0}],
+            ("AWS/ElastiCache", "CurrConnections", (("CacheClusterId", "orders-cache-us-west-2"),)): [{"Maximum": 0.0}],
+            ("AWS/CloudFront", "Requests", (("DistributionId", "DIST123"), ("Region", "Global"))): [{"Sum": 7.0}],
+        }
+        return {"Datapoints": datapoints.get(key, [])}
+
+
 class FakeCeClient:
     def __init__(self, region_name: str | None = None, counters=None, failures=None):
         self.failures = failures if failures is not None else {}
@@ -295,6 +314,7 @@ class FakeSession:
             "eks": FakeEksClient,
             "elasticache": FakeElastiCacheClient,
             "cloudfront": FakeCloudFrontClient,
+            "cloudwatch": FakeCloudWatchClient,
             "ce": FakeCeClient,
         }
         return mapping[service_name](region_name=region_name, counters=self.counters, failures=self.failures)
@@ -331,6 +351,17 @@ def test_aws_collector_uses_tagging_as_primary_inventory_source() -> None:
     unattributed = next(cost for cost in bundle.costs if cost.resource_id == "unattributed")
     assert unattributed.mtd_cost_usd == 1.2
     assert bundle.warnings == []
+
+    assert next(service for service in bundle.services if service.service_name == "ec2").status.value == "ACTIVE"
+    assert next(service for service in bundle.services if service.service_name == "rds").status.value == "ACTIVE"
+    assert next(service for service in bundle.services if service.service_name == "lambda").status.value == "ACTIVE"
+    assert next(service for service in bundle.services if service.service_name == "sqs").status.value == "IDLE"
+    assert next(service for service in bundle.services if service.service_name == "sns").status.value == "IDLE"
+    assert next(service for service in bundle.services if service.service_name == "apigateway").status.value == "ACTIVE"
+    assert next(service for service in bundle.services if service.service_name == "elasticache").status.value == "IDLE"
+    assert next(service for service in bundle.services if service.service_name == "cloudfront").status.value == "ACTIVE"
+    assert next(service for service in bundle.services if service.service_name == "s3").status.value == "UNKNOWN"
+    assert next(service for service in bundle.services if service.service_name == "eks").status.value == "UNKNOWN"
 
 
 def test_aws_collector_adds_tagging_only_supported_resources() -> None:
