@@ -87,6 +87,68 @@ class FakeEc2Client:
             }
         ])
 
+    def describe_vpcs(self):
+        return {
+            "Vpcs": [
+                {
+                    "VpcId": "vpc-main",
+                    "CidrBlock": "10.0.0.0/16",
+                    "IsDefault": False,
+                    "State": "available",
+                    "Tags": [{"Key": "Environment", "Value": "runtime"}],
+                }
+            ]
+        }
+
+    def describe_subnets(self):
+        return {
+            "Subnets": [
+                {
+                    "SubnetId": "subnet-app",
+                    "VpcId": "vpc-main",
+                    "CidrBlock": "10.0.1.0/24",
+                    "AvailabilityZone": f"{self.region_name}a",
+                    "MapPublicIpOnLaunch": True,
+                    "Tags": [{"Key": "Tier", "Value": "app"}],
+                },
+                {
+                    "SubnetId": "subnet-public",
+                    "VpcId": "vpc-main",
+                    "CidrBlock": "10.0.2.0/24",
+                    "AvailabilityZone": f"{self.region_name}b",
+                    "MapPublicIpOnLaunch": True,
+                    "Tags": [{"Key": "Tier", "Value": "public"}],
+                },
+            ]
+        }
+
+    def describe_security_groups(self):
+        return {
+            "SecurityGroups": [
+                {
+                    "GroupId": "sg-web",
+                    "GroupName": "web",
+                    "Description": "web tier",
+                    "VpcId": "vpc-main",
+                    "Tags": [{"Key": "Environment", "Value": "runtime"}],
+                },
+                {
+                    "GroupId": "sg-db-client",
+                    "GroupName": "db-client",
+                    "Description": "db clients",
+                    "VpcId": "vpc-main",
+                    "Tags": [{"Key": "Environment", "Value": "runtime"}],
+                },
+                {
+                    "GroupId": "sg-db",
+                    "GroupName": "db",
+                    "Description": "db",
+                    "VpcId": "vpc-main",
+                    "Tags": [{"Key": "Critical", "Value": "true"}],
+                },
+            ]
+        }
+
 
 class FakeRdsClient:
     def __init__(self, region_name: str | None = None, counters=None, failures=None):
@@ -221,6 +283,127 @@ class FakeEcsClient:
 
     def describe_clusters(self, clusters, include):
         return {"clusters": [{"clusterArn": f"arn:aws:ecs:{self.region_name}:123456789012:cluster/orders-{self.region_name}", "clusterName": f"orders-{self.region_name}", "registeredContainerInstancesCount": 2, "runningTasksCount": 3, "activeServicesCount": 1, "tags": [{"Key": "Environment", "Value": "runtime"}]}]}
+
+    def list_services(self, cluster):
+        return {"serviceArns": [f"arn:aws:ecs:{self.region_name}:123456789012:service/orders-{self.region_name}/website"]}  # noqa: E501
+
+    def describe_services(self, cluster, services, include):
+        return {
+            "services": [
+                {
+                    "serviceArn": f"arn:aws:ecs:{self.region_name}:123456789012:service/orders-{self.region_name}/website",
+                    "serviceName": "website",
+                    "taskDefinition": f"arn:aws:ecs:{self.region_name}:123456789012:task-definition/website:12",
+                    "launchType": "FARGATE",
+                    "desiredCount": 2,
+                    "runningCount": 2,
+                    "networkConfiguration": {
+                        "awsvpcConfiguration": {
+                            "subnets": ["subnet-app", "subnet-public"],
+                            "securityGroups": ["sg-web"],
+                        }
+                    },
+                    "loadBalancers": [
+                        {
+                            "targetGroupArn": f"arn:aws:elasticloadbalancing:{self.region_name}:123456789012:targetgroup/orders-web/abc123",
+                            "containerName": "website",
+                            "containerPort": 80,
+                        }
+                    ],
+                    "tags": [{"Key": "Environment", "Value": "runtime"}],
+                }
+            ]
+        }
+
+    def describe_task_definition(self, taskDefinition):
+        return {
+            "taskDefinition": {
+                "taskDefinitionArn": taskDefinition,
+                "executionRoleArn": "arn:aws:iam::123456789012:role/orders-lambda-role",
+                "taskRoleArn": "arn:aws:iam::123456789012:role/orders-lambda-role",
+                "containerDefinitions": [
+                    {"name": "website", "image": "123456789012.dkr.ecr.us-west-2.amazonaws.com/orders-web:latest"}
+                ],
+            }
+        }
+
+
+class FakeElbv2Client:
+    def __init__(self, region_name: str | None = None, counters=None, failures=None):
+        self.region_name = region_name
+
+    def describe_target_groups(self, TargetGroupArns):
+        arn = TargetGroupArns[0]
+        return {
+            "TargetGroups": [
+                {
+                    "TargetGroupArn": arn,
+                    "TargetGroupName": "orders-web",
+                    "LoadBalancerArns": [f"arn:aws:elasticloadbalancing:{self.region_name}:123456789012:loadbalancer/app/orders-web/def456"],
+                    "VpcId": "vpc-main",
+                    "Protocol": "HTTP",
+                    "Port": 80,
+                    "TargetType": "ip",
+                    "HealthCheckPath": "/health",
+                }
+            ]
+        }
+
+    def describe_load_balancers(self, LoadBalancerArns):
+        arn = LoadBalancerArns[0]
+        return {
+            "LoadBalancers": [
+                {
+                    "LoadBalancerArn": arn,
+                    "LoadBalancerName": "orders-web",
+                    "DNSName": "orders-web-123.us-west-2.elb.amazonaws.com",
+                    "Scheme": "internet-facing",
+                    "Type": "application",
+                    "VpcId": "vpc-main",
+                    "SecurityGroups": ["sg-web"],
+                    "AvailabilityZones": [{"SubnetId": "subnet-public"}, {"SubnetId": "subnet-app"}],
+                    "State": {"Code": "active"},
+                }
+            ]
+        }
+
+    def describe_listeners(self, LoadBalancerArn):
+        return {"Listeners": [{"ListenerArn": f"{LoadBalancerArn}/listener/app/443"}]}
+
+    def describe_tags(self, ResourceArns):
+        return {"TagDescriptions": [{"ResourceArn": ResourceArns[0], "Tags": [{"Key": "Environment", "Value": "runtime"}]}]}
+
+
+class FakeEcrClient:
+    def __init__(self, region_name: str | None = None, counters=None, failures=None):
+        self.region_name = region_name
+
+    def get_paginator(self, name):
+        assert name == "describe_repositories"
+        return FakePaginator(
+            [
+                {
+                    "repositories": [
+                        {
+                            "repositoryArn": f"arn:aws:ecr:{self.region_name}:123456789012:repository/orders-web",
+                            "repositoryName": "orders-web",
+                            "repositoryUri": f"123456789012.dkr.ecr.{self.region_name}.amazonaws.com/orders-web",
+                            "imageTagMutability": "MUTABLE",
+                            "imageScanningConfiguration": {"scanOnPush": True},
+                        }
+                    ]
+                }
+            ]
+        )
+
+    def list_tags_for_resource(self, resourceArn):
+        return {"tags": [{"Key": "Environment", "Value": "runtime"}]}
+
+    def get_lifecycle_policy(self, repositoryName):
+        return {"lifecyclePolicyText": "{}"}
+
+    def describe_images(self, repositoryName, maxResults):
+        return {"imageDetails": [{"imageTags": ["latest", "prod"], "imageDigest": "sha256:abc"}]}
 
 
 class FakeEksClient:
@@ -408,9 +591,11 @@ class FakeSession:
             "sns": FakeSnsClient,
             "apigateway": FakeApiGatewayClient,
             "ecs": FakeEcsClient,
+            "elbv2": FakeElbv2Client,
             "eks": FakeEksClient,
             "elasticache": FakeElastiCacheClient,
             "cloudfront": FakeCloudFrontClient,
+            "ecr": FakeEcrClient,
             "cloudwatch": FakeCloudWatchClient,
             "config": FakeConfigClient,
             "cloudtrail": FakeCloudTrailClient,
@@ -431,7 +616,7 @@ def test_aws_collector_uses_tagging_as_primary_inventory_source() -> None:
     bundle = collector.load("scan-aws-1")
 
     service_names = {service.service_name for service in bundle.services}
-    assert service_names == {"ec2", "rds", "lambda", "s3", "sqs", "sns", "apigateway", "ecs", "eks", "elasticache", "cloudfront"}
+    assert service_names == {"ec2", "vpc", "subnet", "security-group", "rds", "lambda", "s3", "sqs", "sns", "apigateway", "ecs", "eks", "elasticache", "cloudfront", "elbv2", "ecr"}
 
     ec2_service = next(service for service in bundle.services if service.service_name == "ec2")
     assert ec2_service.tags["Environment"] == "tagging"
@@ -448,7 +633,27 @@ def test_aws_collector_uses_tagging_as_primary_inventory_source() -> None:
     assert api_service.metadata["integrations"] == ["arn:aws:lambda:us-west-2:123456789012:function:process-orders-us-west-2"]
     assert api_service.metadata["cloudtrail_related_resources"] == ["arn:aws:lambda:us-west-2:123456789012:function:process-orders-us-west-2"]
 
-    assert any(service.service_name == "ecs" for service in bundle.services)
+    assert any(service.service_name == "ecs" and service.resource_type == "AWS::ECS::Cluster" for service in bundle.services)
+    ecs_service = next(service for service in bundle.services if service.resource_type == "AWS::ECS::Service")
+    assert ecs_service.metadata["target_group_arns"] == ["arn:aws:elasticloadbalancing:us-west-2:123456789012:targetgroup/orders-web/abc123"]
+    assert ecs_service.metadata["load_balancer_arns"] == ["arn:aws:elasticloadbalancing:us-west-2:123456789012:loadbalancer/app/orders-web/def456"]
+    assert ecs_service.metadata["container_images"] == ["123456789012.dkr.ecr.us-west-2.amazonaws.com/orders-web:latest"]
+    assert ecs_service.metadata["repository_uris"] == ["123456789012.dkr.ecr.us-west-2.amazonaws.com/orders-web"]
+    assert ecs_service.metadata["ecr_repository_arns"] == ["arn:aws:ecr:us-west-2:123456789012:repository/orders-web"]
+
+    target_group = next(service for service in bundle.services if service.resource_type == "AWS::ElasticLoadBalancingV2::TargetGroup")
+    assert target_group.metadata["load_balancer_arns"] == ["arn:aws:elasticloadbalancing:us-west-2:123456789012:loadbalancer/app/orders-web/def456"]
+
+    load_balancer = next(service for service in bundle.services if service.resource_type == "AWS::ElasticLoadBalancingV2::LoadBalancer")
+    assert load_balancer.metadata["subnet_ids"] == ["subnet-public", "subnet-app"]
+
+    repository = next(service for service in bundle.services if service.resource_type == "AWS::ECR::Repository")
+    assert repository.metadata["repository_uri"] == "123456789012.dkr.ecr.us-west-2.amazonaws.com/orders-web"
+    assert repository.metadata["recent_images"] == ["latest", "prod"]
+
+    assert any(service.resource_type == "AWS::EC2::VPC" for service in bundle.services)
+    assert any(service.resource_type == "AWS::EC2::Subnet" for service in bundle.services)
+    assert any(service.resource_type == "AWS::EC2::SecurityGroup" for service in bundle.services)
     assert any(service.service_name == "eks" for service in bundle.services)
     assert any(service.service_name == "elasticache" for service in bundle.services)
     assert any(service.service_name == "cloudfront" for service in bundle.services)
@@ -476,6 +681,7 @@ def test_aws_collector_uses_tagging_as_primary_inventory_source() -> None:
     assert next(service for service in bundle.services if service.service_name == "ec2").status.value == "ACTIVE"
     assert next(service for service in bundle.services if service.service_name == "rds").status.value == "ACTIVE"
     assert next(service for service in bundle.services if service.service_name == "lambda").status.value == "ACTIVE"
+    assert ecs_service.status.value == "ACTIVE"
     assert next(service for service in bundle.services if service.service_name == "sqs").status.value == "IDLE"
     assert next(service for service in bundle.services if service.service_name == "sns").status.value == "IDLE"
     assert next(service for service in bundle.services if service.service_name == "apigateway").status.value == "ACTIVE"
@@ -558,14 +764,22 @@ def _tagging_items_for_region(region: str | None):
     if region == "us-west-2":
         return [
             {"ResourceARN": "arn:aws:ec2:us-west-2:123456789012:instance/i-us-west-2", "ResourceType": "ec2:instance", "Tags": [{"Key": "Environment", "Value": "tagging"}, {"Key": "Owner", "Value": "platform"}]},
+            {"ResourceARN": "arn:aws:ec2:us-west-2:123456789012:vpc/vpc-main", "ResourceType": "ec2:vpc", "Tags": [{"Key": "Environment", "Value": "tagging"}]},
+            {"ResourceARN": "arn:aws:ec2:us-west-2:123456789012:subnet/subnet-app", "ResourceType": "ec2:subnet", "Tags": [{"Key": "Environment", "Value": "tagging"}]},
+            {"ResourceARN": "arn:aws:ec2:us-west-2:123456789012:subnet/subnet-public", "ResourceType": "ec2:subnet", "Tags": [{"Key": "Environment", "Value": "tagging"}]},
+            {"ResourceARN": "arn:aws:ec2:us-west-2:123456789012:security-group/sg-web", "ResourceType": "ec2:security-group", "Tags": [{"Key": "Environment", "Value": "tagging"}]},
             {"ResourceARN": "arn:aws:rds:us-west-2:123456789012:db:orders-db-us-west-2", "ResourceType": "rds:db", "Tags": [{"Key": "Environment", "Value": "tagging"}]},
             {"ResourceARN": "arn:aws:lambda:us-west-2:123456789012:function:process-orders-us-west-2", "ResourceType": "lambda:function", "Tags": [{"Key": "Environment", "Value": "tagging"}]},
             {"ResourceARN": "arn:aws:sqs:us-west-2:123456789012:orders-queue-us-west-2", "ResourceType": "sqs:queue", "Tags": [{"Key": "Environment", "Value": "tagging"}]},
             {"ResourceARN": "arn:aws:sns:us-west-2:123456789012:orders-topic-us-west-2", "ResourceType": "sns:topic", "Tags": [{"Key": "Environment", "Value": "tagging"}]},
             {"ResourceARN": "arn:aws:apigateway:us-west-2::/restapis/orders-api-us-west-2", "ResourceType": "apigateway:restapis", "Tags": [{"Key": "Environment", "Value": "tagging"}]},
             {"ResourceARN": "arn:aws:ecs:us-west-2:123456789012:cluster/orders-us-west-2", "ResourceType": "ecs:cluster", "Tags": [{"Key": "Environment", "Value": "tagging"}]},
+            {"ResourceARN": "arn:aws:ecs:us-west-2:123456789012:service/orders-us-west-2/website", "ResourceType": "ecs:service", "Tags": [{"Key": "Environment", "Value": "tagging"}]},
             {"ResourceARN": "arn:aws:eks:us-west-2:123456789012:cluster/orders-us-west-2", "ResourceType": "eks:cluster", "Tags": [{"Key": "Environment", "Value": "tagging"}]},
             {"ResourceARN": "arn:aws:elasticache:us-west-2:123456789012:cluster:orders-cache-us-west-2", "ResourceType": "elasticache:cluster", "Tags": [{"Key": "Environment", "Value": "tagging"}]},
+            {"ResourceARN": "arn:aws:elasticloadbalancing:us-west-2:123456789012:targetgroup/orders-web/abc123", "ResourceType": "elasticloadbalancing:targetgroup", "Tags": [{"Key": "Environment", "Value": "tagging"}]},
+            {"ResourceARN": "arn:aws:elasticloadbalancing:us-west-2:123456789012:loadbalancer/app/orders-web/def456", "ResourceType": "elasticloadbalancing:loadbalancer", "Tags": [{"Key": "Environment", "Value": "tagging"}]},
+            {"ResourceARN": "arn:aws:ecr:us-west-2:123456789012:repository/orders-web", "ResourceType": "ecr:repository", "Tags": [{"Key": "Environment", "Value": "tagging"}]},
             {"ResourceARN": "arn:aws:sqs:us-west-2:123456789012:orders-queue-shadow-us-west-2", "ResourceType": "sqs:queue", "Tags": [{"Key": "Environment", "Value": "tagging"}, {"Key": "Shadow", "Value": "true"}]},
         ]
     return [

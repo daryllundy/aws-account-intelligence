@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
+from enum import Enum
 from typing import Iterator
 
 from sqlalchemy import JSON, DateTime, Float, Integer, String, Text, create_engine, select
@@ -165,7 +166,7 @@ class Database:
                         status=record.status.value,
                         last_seen_at=record.last_seen_at,
                         scan_run_id=record.scan_run_id,
-                        resource_metadata=record.metadata,
+                        resource_metadata=_normalize_json_value(record.metadata),
                     )
                 )
 
@@ -200,7 +201,7 @@ class Database:
                         evidence_source=edge.evidence_source,
                         confidence=edge.confidence,
                         rationale=edge.rationale,
-                        resource_metadata=edge.metadata,
+                        resource_metadata=_normalize_json_value(edge.metadata),
                     )
                 )
 
@@ -313,6 +314,20 @@ def _scan_run_from_row(row: ScanRunRow) -> ScanRun:
         edge_count=row.edge_count,
         summary=row.summary or {},
     )
+
+
+def _normalize_json_value(value):
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, dict):
+        return {str(key): _normalize_json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_normalize_json_value(item) for item in value]
+    return str(value)
 
 
 def _service_record_from_row(row: ServiceRecordRow) -> ServiceRecord:

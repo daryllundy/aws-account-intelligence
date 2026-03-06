@@ -26,19 +26,25 @@ SERVICE_LABELS = {
     "Amazon Elastic Kubernetes Service": "eks",
     "Amazon ElastiCache": "elasticache",
     "Amazon CloudFront": "cloudfront",
+    "Amazon Elastic Container Registry (ECR)": "ecr",
 }
 TAGGING_RESOURCE_TYPES = {
     "ec2": ["ec2:instance"],
+    "vpc": ["ec2:vpc"],
+    "subnet": ["ec2:subnet"],
+    "security-group": ["ec2:security-group"],
     "rds": ["rds:db"],
     "lambda": ["lambda:function"],
     "s3": ["s3:bucket"],
     "sqs": ["sqs:queue"],
     "sns": ["sns:topic"],
     "apigateway": ["apigateway:restapis"],
-    "ecs": ["ecs:cluster"],
+    "ecs": ["ecs:cluster", "ecs:service"],
     "eks": ["eks:cluster"],
     "elasticache": ["elasticache:cluster"],
     "cloudfront": ["cloudfront:distribution"],
+    "elbv2": ["elasticloadbalancing:loadbalancer", "elasticloadbalancing:targetgroup"],
+    "ecr": ["ecr:repository"],
 }
 THROTTLE_CODES = {
     "Throttled",
@@ -58,6 +64,9 @@ class AwsCollector:
         self._account_id: str | None = None
         self._regional_collectors: list[tuple[str, Callable[[str, str, str], list[ServiceRecord]]]] = [
             ("ec2", self._collect_ec2),
+            ("vpc", self._collect_vpcs),
+            ("subnet", self._collect_subnets),
+            ("security-group", self._collect_security_groups),
             ("rds", self._collect_rds),
             ("lambda", self._collect_lambda),
             ("sqs", self._collect_sqs),
@@ -66,6 +75,7 @@ class AwsCollector:
             ("ecs", self._collect_ecs),
             ("eks", self._collect_eks),
             ("elasticache", self._collect_elasticache),
+            ("ecr", self._collect_ecr),
         ]
 
     def load(self, scan_run_id: str) -> DiscoveryBundle:
@@ -324,6 +334,100 @@ class AwsCollector:
                 )
         return records
 
+    def _collect_vpcs(self, scan_run_id: str, account_id: str, region: str, tag_index: dict[str, dict[str, Any]]) -> list[ServiceRecord]:
+        client = self.session.client("ec2", region_name=region)
+        records: list[ServiceRecord] = []
+        for vpc in client.describe_vpcs().get("Vpcs", []):
+            vpc_id = vpc["VpcId"]
+            arn = f"arn:aws:ec2:{region}:{account_id}:vpc/{vpc_id}"
+            records.append(
+                ServiceRecord(
+                    resource_id=arn,
+                    arn=arn,
+                    resource_type="AWS::EC2::VPC",
+                    service_name="vpc",
+                    region=region,
+                    account_id=account_id,
+                    tags=self._merged_tags(arn, tag_index, _tag_map(vpc.get("Tags", []))),
+                    status=ResourceStatus.ACTIVE,
+                    last_seen_at=datetime.now(UTC),
+                    scan_run_id=scan_run_id,
+                    metadata={
+                        "vpc_id": vpc_id,
+                        "cidr_block": vpc.get("CidrBlock"),
+                        "is_default": vpc.get("IsDefault", False),
+                        "state": vpc.get("State"),
+                        "discovery_sources": ["tagging_api", "describe_vpcs"],
+                    },
+                )
+            )
+        return records
+
+    def _collect_subnets(self, scan_run_id: str, account_id: str, region: str, tag_index: dict[str, dict[str, Any]]) -> list[ServiceRecord]:
+        client = self.session.client("ec2", region_name=region)
+        records: list[ServiceRecord] = []
+        for subnet in client.describe_subnets().get("Subnets", []):
+            subnet_id = subnet["SubnetId"]
+            arn = f"arn:aws:ec2:{region}:{account_id}:subnet/{subnet_id}"
+            records.append(
+                ServiceRecord(
+                    resource_id=arn,
+                    arn=arn,
+                    resource_type="AWS::EC2::Subnet",
+                    service_name="subnet",
+                    region=region,
+                    account_id=account_id,
+                    tags=self._merged_tags(arn, tag_index, _tag_map(subnet.get("Tags", []))),
+                    status=ResourceStatus.ACTIVE,
+                    last_seen_at=datetime.now(UTC),
+                    scan_run_id=scan_run_id,
+                    metadata={
+                        "subnet_id": subnet_id,
+                        "vpc_id": subnet.get("VpcId"),
+                        "cidr_block": subnet.get("CidrBlock"),
+                        "availability_zone": subnet.get("AvailabilityZone"),
+                        "map_public_ip_on_launch": subnet.get("MapPublicIpOnLaunch", False),
+                        "discovery_sources": ["tagging_api", "describe_subnets"],
+                    },
+                )
+            )
+        return records
+
+    def _collect_security_groups(
+        self,
+        scan_run_id: str,
+        account_id: str,
+        region: str,
+        tag_index: dict[str, dict[str, Any]],
+    ) -> list[ServiceRecord]:
+        client = self.session.client("ec2", region_name=region)
+        records: list[ServiceRecord] = []
+        for group in client.describe_security_groups().get("SecurityGroups", []):
+            group_id = group["GroupId"]
+            arn = f"arn:aws:ec2:{region}:{account_id}:security-group/{group_id}"
+            records.append(
+                ServiceRecord(
+                    resource_id=arn,
+                    arn=arn,
+                    resource_type="AWS::EC2::SecurityGroup",
+                    service_name="security-group",
+                    region=region,
+                    account_id=account_id,
+                    tags=self._merged_tags(arn, tag_index, _tag_map(group.get("Tags", []))),
+                    status=ResourceStatus.ACTIVE,
+                    last_seen_at=datetime.now(UTC),
+                    scan_run_id=scan_run_id,
+                    metadata={
+                        "security_group_id": group_id,
+                        "group_name": group.get("GroupName"),
+                        "description": group.get("Description"),
+                        "vpc_id": group.get("VpcId"),
+                        "discovery_sources": ["tagging_api", "describe_security_groups"],
+                    },
+                )
+            )
+        return records
+
     def _collect_lambda(self, scan_run_id: str, account_id: str, region: str, tag_index: dict[str, dict[str, Any]]) -> list[ServiceRecord]:
         client = self.session.client("lambda", region_name=region)
         paginator = client.get_paginator("list_functions")
@@ -495,6 +599,9 @@ class AwsCollector:
             return []
         response = client.describe_clusters(clusters=cluster_arns, include=["TAGS"])
         records: list[ServiceRecord] = []
+        elbv2_client = self.session.client("elbv2", region_name=region)
+        target_group_cache: dict[str, dict[str, Any]] = {}
+        load_balancer_cache: dict[str, dict[str, Any]] = {}
         for cluster in response.get("clusters", []):
             arn = cluster["clusterArn"]
             records.append(
@@ -515,6 +622,140 @@ class AwsCollector:
                         "running_tasks_count": cluster.get("runningTasksCount", 0),
                         "active_services_count": cluster.get("activeServicesCount", 0),
                         "discovery_sources": ["tagging_api", "describe_clusters"],
+                    },
+                )
+            )
+            service_arns = client.list_services(cluster=arn).get("serviceArns", [])
+            if not service_arns:
+                continue
+            described_services = client.describe_services(cluster=arn, services=service_arns, include=["TAGS"]).get("services", [])
+            for service in described_services:
+                service_arn = service["serviceArn"]
+                task_definition_arn = service.get("taskDefinition")
+                task_definition = {}
+                if task_definition_arn:
+                    task_definition = _safe_call(
+                        lambda td=task_definition_arn: client.describe_task_definition(taskDefinition=td).get("taskDefinition", {}),
+                        {},
+                    )
+                network_config = (service.get("networkConfiguration") or {}).get("awsvpcConfiguration") or {}
+                container_images = [
+                    item.get("image")
+                    for item in task_definition.get("containerDefinitions", [])
+                    if item.get("image")
+                ]
+                target_group_arns = sorted(
+                    {
+                        item.get("targetGroupArn")
+                        for item in service.get("loadBalancers", [])
+                        if item.get("targetGroupArn")
+                    }
+                )
+                load_balancer_arns: set[str] = set()
+                for target_group_arn in target_group_arns:
+                    if target_group_arn not in target_group_cache:
+                        target_group_cache[target_group_arn] = (
+                            elbv2_client.describe_target_groups(TargetGroupArns=[target_group_arn]).get("TargetGroups", [{}])[0]
+                        )
+                    target_group = target_group_cache[target_group_arn]
+                    load_balancer_arns.update(target_group.get("LoadBalancerArns", []))
+                for load_balancer_arn in list(load_balancer_arns):
+                    if load_balancer_arn not in load_balancer_cache:
+                        load_balancer_cache[load_balancer_arn] = (
+                            elbv2_client.describe_load_balancers(LoadBalancerArns=[load_balancer_arn]).get("LoadBalancers", [{}])[0]
+                        )
+
+                records.append(
+                    ServiceRecord(
+                        resource_id=service_arn,
+                        arn=service_arn,
+                        resource_type="AWS::ECS::Service",
+                        service_name="ecs",
+                        region=region,
+                        account_id=account_id,
+                        tags=self._merged_tags(service_arn, tag_index, _tag_map(service.get("tags", []))),
+                        status=ResourceStatus.ACTIVE,
+                        last_seen_at=datetime.now(UTC),
+                        scan_run_id=scan_run_id,
+                        metadata={
+                            "service_name": service.get("serviceName"),
+                            "cluster_arn": arn,
+                            "cluster_name": cluster.get("clusterName"),
+                            "task_definition_arn": task_definition_arn,
+                            "launch_type": service.get("launchType"),
+                            "desired_count": service.get("desiredCount", 0),
+                            "running_count": service.get("runningCount", 0),
+                            "subnet_ids": network_config.get("subnets", []),
+                            "security_groups": network_config.get("securityGroups", []),
+                            "target_group_arns": target_group_arns,
+                            "load_balancer_arns": sorted(load_balancer_arns),
+                            "container_images": container_images,
+                            "repository_uris": sorted({uri for image in container_images if (uri := _extract_ecr_repository_uri(image))}),
+                            "execution_role": task_definition.get("executionRoleArn"),
+                            "task_role_arn": task_definition.get("taskRoleArn"),
+                            "discovery_sources": ["describe_clusters", "describe_services", "describe_task_definition"],
+                        },
+                    )
+                )
+
+        for target_group_arn, target_group in target_group_cache.items():
+            records.append(
+                ServiceRecord(
+                    resource_id=target_group_arn,
+                    arn=target_group_arn,
+                    resource_type="AWS::ElasticLoadBalancingV2::TargetGroup",
+                    service_name="elbv2",
+                    region=region,
+                    account_id=account_id,
+                    tags=self._merged_tags(target_group_arn, tag_index, _elbv2_tags(elbv2_client, target_group_arn)),
+                    status=ResourceStatus.ACTIVE,
+                    last_seen_at=datetime.now(UTC),
+                    scan_run_id=scan_run_id,
+                    metadata={
+                        "target_group_name": target_group.get("TargetGroupName"),
+                        "load_balancer_arns": target_group.get("LoadBalancerArns", []),
+                        "vpc_id": target_group.get("VpcId"),
+                        "protocol": target_group.get("Protocol"),
+                        "port": target_group.get("Port"),
+                        "target_type": target_group.get("TargetType"),
+                        "health_check_path": target_group.get("HealthCheckPath"),
+                        "discovery_sources": ["describe_target_groups"],
+                    },
+                )
+            )
+
+        for load_balancer_arn, load_balancer in load_balancer_cache.items():
+            listener_arns = [
+                item.get("ListenerArn")
+                for item in _safe_call(lambda lb=load_balancer_arn: elbv2_client.describe_listeners(LoadBalancerArn=lb).get("Listeners", []), [])
+                if item.get("ListenerArn")
+            ]
+            records.append(
+                ServiceRecord(
+                    resource_id=load_balancer_arn,
+                    arn=load_balancer_arn,
+                    resource_type="AWS::ElasticLoadBalancingV2::LoadBalancer",
+                    service_name="elbv2",
+                    region=region,
+                    account_id=account_id,
+                    tags=self._merged_tags(load_balancer_arn, tag_index, _elbv2_tags(elbv2_client, load_balancer_arn)),
+                    status=_status_from_state(load_balancer.get("State", {}).get("Code")),
+                    last_seen_at=datetime.now(UTC),
+                    scan_run_id=scan_run_id,
+                    metadata={
+                        "load_balancer_name": load_balancer.get("LoadBalancerName"),
+                        "dns_name": load_balancer.get("DNSName"),
+                        "scheme": load_balancer.get("Scheme"),
+                        "load_balancer_type": load_balancer.get("Type"),
+                        "vpc_id": load_balancer.get("VpcId"),
+                        "security_groups": load_balancer.get("SecurityGroups", []),
+                        "subnet_ids": [
+                            item.get("SubnetId")
+                            for item in load_balancer.get("AvailabilityZones", [])
+                            if item.get("SubnetId")
+                        ],
+                        "listener_arns": listener_arns,
+                        "discovery_sources": ["describe_load_balancers", "describe_listeners"],
                     },
                 )
             )
@@ -615,6 +856,42 @@ class AwsCollector:
                     },
                 )
             )
+        return records
+
+    def _collect_ecr(self, scan_run_id: str, account_id: str, region: str, tag_index: dict[str, dict[str, Any]]) -> list[ServiceRecord]:
+        client = self.session.client("ecr", region_name=region)
+        paginator = client.get_paginator("describe_repositories")
+        records: list[ServiceRecord] = []
+        for page in paginator.paginate():
+            for repository in page.get("repositories", []):
+                arn = repository["repositoryArn"]
+                repository_name = repository.get("repositoryName")
+                records.append(
+                    ServiceRecord(
+                        resource_id=arn,
+                        arn=arn,
+                        resource_type="AWS::ECR::Repository",
+                        service_name="ecr",
+                        region=region,
+                        account_id=account_id,
+                        tags=self._merged_tags(arn, tag_index, _ecr_tags(client, arn)),
+                        status=ResourceStatus.ACTIVE,
+                        last_seen_at=datetime.now(UTC),
+                        scan_run_id=scan_run_id,
+                        metadata={
+                            "repository_name": repository_name,
+                            "repository_uri": repository.get("repositoryUri"),
+                            "image_tag_mutability": repository.get("imageTagMutability"),
+                            "scan_on_push": (repository.get("imageScanningConfiguration") or {}).get("scanOnPush", False),
+                            "lifecycle_policy_present": _safe_call(
+                                lambda name=repository_name: bool(client.get_lifecycle_policy(repositoryName=name).get("lifecyclePolicyText")),
+                                False,
+                            ),
+                            "recent_images": _ecr_recent_images(client, repository_name),
+                            "discovery_sources": ["tagging_api", "describe_repositories", "describe_images"],
+                        },
+                    )
+                )
         return records
 
     def _add_tagging_only_resources(
@@ -719,8 +996,32 @@ class AwsCollector:
 
     def _enrich_relationship_metadata(self, services: list[ServiceRecord]) -> list[ServiceRecord]:
         by_id = {service.resource_id: service for service in services}
+        subnet_to_vpc = {
+            service.metadata.get("subnet_id"): service.metadata.get("vpc_id")
+            for service in services
+            if service.resource_type == "AWS::EC2::Subnet" and service.metadata.get("subnet_id")
+        }
+        ecr_repo_by_uri = {
+            service.metadata.get("repository_uri"): service.resource_id
+            for service in services
+            if service.resource_type == "AWS::ECR::Repository" and service.metadata.get("repository_uri")
+        }
         for service in services:
             if service.service_name != "sns":
+                if not service.metadata.get("vpc_id"):
+                    for subnet_id in service.metadata.get("subnet_ids", []):
+                        vpc_id = subnet_to_vpc.get(subnet_id)
+                        if vpc_id:
+                            service.metadata["vpc_id"] = vpc_id
+                            break
+                if service.resource_type == "AWS::ECS::Service":
+                    repository_arns = [
+                        repo_arn
+                        for repo_uri in service.metadata.get("repository_uris", [])
+                        if (repo_arn := ecr_repo_by_uri.get(repo_uri))
+                    ]
+                    if repository_arns:
+                        service.metadata["ecr_repository_arns"] = sorted(set(repository_arns))
                 continue
             for endpoint in service.metadata.get("subscriptions", []):
                 downstream = by_id.get(endpoint)
@@ -888,6 +1189,8 @@ class AwsCollector:
         if service_name == "eks":
             return ResourceStatus.UNKNOWN
         if service_name == "ecs":
+            if service.resource_type == "AWS::ECS::Service":
+                return ResourceStatus.ACTIVE if service.metadata.get("running_count", 0) > 0 else ResourceStatus.IDLE
             return ResourceStatus.ACTIVE if service.metadata.get("running_tasks_count", 0) > 0 else ResourceStatus.IDLE
 
         metric = self._activity_metric(service)
@@ -1225,8 +1528,11 @@ def _resource_index(services: list[ServiceRecord]) -> dict[str, str]:
             index[service.metadata.get("db_instance_identifier", "")] = service.resource_id
         if service.service_name == "ec2":
             index[service.metadata.get("instance_id", "")] = service.resource_id
-        if service.service_name == "apigateway":
-            index[service.metadata.get("api_id", "")] = service.resource_id
+    if service.service_name == "apigateway":
+        index[service.metadata.get("api_id", "")] = service.resource_id
+    if service.service_name == "ecr":
+        index[service.metadata.get("repository_name", "")] = service.resource_id
+        index[service.metadata.get("repository_uri", "")] = service.resource_id
     return {key: value for key, value in index.items() if key}
 
 
@@ -1282,6 +1588,14 @@ def _extract_lambda_arn(uri: str | None) -> str | None:
     return suffix.split("/invocations", 1)[0]
 
 
+def _extract_ecr_repository_uri(image: str | None) -> str | None:
+    if not image or ".dkr.ecr." not in image:
+        return None
+    image_ref = image.split("@", 1)[0]
+    image_ref = image_ref.rsplit(":", 1)[0]
+    return image_ref
+
+
 def _rds_tags(client, arn: str) -> dict[str, str]:
     response = client.list_tags_for_resource(ResourceName=arn)
     return {item["Key"]: item["Value"] for item in response.get("TagList", [])}
@@ -1307,6 +1621,37 @@ def _cloudfront_tags(client, arn: str) -> dict[str, str]:
     return {item["Key"]: item["Value"] for item in response.get("Tags", {}).get("Items", [])}
 
 
+def _elbv2_tags(client, arn: str) -> dict[str, str]:
+    response = client.describe_tags(ResourceArns=[arn])
+    descriptions = response.get("TagDescriptions", [])
+    if not descriptions:
+        return {}
+    return {item["Key"]: item["Value"] for item in descriptions[0].get("Tags", [])}
+
+
+def _ecr_tags(client, arn: str) -> dict[str, str]:
+    response = client.list_tags_for_resource(resourceArn=arn)
+    return {item["Key"]: item["Value"] for item in response.get("tags", [])}
+
+
+def _ecr_recent_images(client, repository_name: str | None) -> list[str]:
+    if not repository_name:
+        return []
+    response = _safe_call(
+        lambda: client.describe_images(repositoryName=repository_name, maxResults=5),
+        {"imageDetails": []},
+    )
+    recent_images: list[str] = []
+    for detail in response.get("imageDetails", []):
+        tags = detail.get("imageTags", [])
+        digest = detail.get("imageDigest")
+        if tags:
+            recent_images.extend(tags[:3])
+        elif digest:
+            recent_images.append(digest)
+    return recent_images[:5]
+
+
 def _is_retryable(exc: ClientError) -> bool:
     code = exc.response.get("Error", {}).get("Code", "")
     return code in THROTTLE_CODES or code in TRANSIENT_CODES
@@ -1318,6 +1663,13 @@ def _resource_type_from_arn(arn: str) -> str:
         return ""
     service = segments[2]
     if service == "ec2":
+        resource = arn.split("/", 1)[-1] if "/" in arn else ""
+        if arn.endswith(":vpc") or ":vpc/" in arn:
+            return "ec2:vpc"
+        if ":subnet/" in arn:
+            return "ec2:subnet"
+        if ":security-group/" in arn:
+            return "ec2:security-group"
         return "ec2:instance"
     if service == "rds":
         return "rds:db"
@@ -1332,6 +1684,9 @@ def _resource_type_from_arn(arn: str) -> str:
     if service == "apigateway":
         return "apigateway:restapis"
     if service == "ecs":
+        resource = arn.split(":")[-1]
+        if resource.startswith("service/"):
+            return "ecs:service"
         return "ecs:cluster"
     if service == "eks":
         return "eks:cluster"
@@ -1339,6 +1694,14 @@ def _resource_type_from_arn(arn: str) -> str:
         return "elasticache:cluster"
     if service == "cloudfront":
         return "cloudfront:distribution"
+    if service == "elasticloadbalancing":
+        resource = arn.split(":")[-1]
+        if resource.startswith("loadbalancer/"):
+            return "elasticloadbalancing:loadbalancer"
+        if resource.startswith("targetgroup/"):
+            return "elasticloadbalancing:targetgroup"
+    if service == "ecr":
+        return "ecr:repository"
     return service
 
 
@@ -1354,6 +1717,7 @@ def _service_name_from_arn(arn: str) -> str | None:
     service = arn.split(":")[2] if len(arn.split(":")) > 2 else ""
     mapping = {
         "ec2": "ec2",
+        "ecr": "ecr",
         "rds": "rds",
         "lambda": "lambda",
         "s3": "s3",
@@ -1364,6 +1728,7 @@ def _service_name_from_arn(arn: str) -> str | None:
         "eks": "eks",
         "elasticache": "elasticache",
         "cloudfront": "cloudfront",
+        "elasticloadbalancing": "elbv2",
     }
     return mapping.get(service)
 
@@ -1371,6 +1736,9 @@ def _service_name_from_arn(arn: str) -> str | None:
 def _schema_type_from_tagging(resource_type: str | None, arn: str) -> str:
     mapping = {
         "ec2:instance": "AWS::EC2::Instance",
+        "ec2:vpc": "AWS::EC2::VPC",
+        "ec2:subnet": "AWS::EC2::Subnet",
+        "ec2:security-group": "AWS::EC2::SecurityGroup",
         "rds:db": "AWS::RDS::DBInstance",
         "lambda:function": "AWS::Lambda::Function",
         "s3:bucket": "AWS::S3::Bucket",
@@ -1378,9 +1746,13 @@ def _schema_type_from_tagging(resource_type: str | None, arn: str) -> str:
         "sns:topic": "AWS::SNS::Topic",
         "apigateway:restapis": "AWS::ApiGateway::RestApi",
         "ecs:cluster": "AWS::ECS::Cluster",
+        "ecs:service": "AWS::ECS::Service",
         "eks:cluster": "AWS::EKS::Cluster",
         "elasticache:cluster": "AWS::ElastiCache::CacheCluster",
         "cloudfront:distribution": "AWS::CloudFront::Distribution",
+        "elasticloadbalancing:loadbalancer": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+        "elasticloadbalancing:targetgroup": "AWS::ElasticLoadBalancingV2::TargetGroup",
+        "ecr:repository": "AWS::ECR::Repository",
     }
     if resource_type and resource_type in mapping:
         return mapping[resource_type]
@@ -1397,28 +1769,61 @@ def _region_from_arn(arn: str, fallback: str) -> str:
 def _config_resource_key(service: ServiceRecord) -> dict[str, str] | None:
     resource_type = {
         "ec2": "AWS::EC2::Instance",
+        "vpc": "AWS::EC2::VPC",
+        "subnet": "AWS::EC2::Subnet",
+        "security-group": "AWS::EC2::SecurityGroup",
         "rds": "AWS::RDS::DBInstance",
         "lambda": "AWS::Lambda::Function",
         "sqs": "AWS::SQS::Queue",
         "sns": "AWS::SNS::Topic",
         "apigateway": "AWS::ApiGateway::RestApi",
-        "ecs": "AWS::ECS::Cluster",
+        "eks": "AWS::EKS::Cluster",
         "eks": "AWS::EKS::Cluster",
         "elasticache": "AWS::ElastiCache::CacheCluster",
+        "ecr": "AWS::ECR::Repository",
+        "elbv2": service.resource_type if service.resource_type in {"AWS::ElasticLoadBalancingV2::LoadBalancer", "AWS::ElasticLoadBalancingV2::TargetGroup"} else None,
     }.get(service.service_name)
     if not resource_type:
-        return None
+        if service.resource_type == "AWS::ECS::Service":
+            resource_type = "AWS::ECS::Service"
+        elif service.resource_type == "AWS::ECS::Cluster":
+            resource_type = "AWS::ECS::Cluster"
+        else:
+            return None
 
-    resource_id = (
-        service.metadata.get("instance_id")
-        or service.metadata.get("db_instance_identifier")
-        or service.metadata.get("function_name")
-        or service.metadata.get("queue_name")
-        or service.metadata.get("topic_name")
-        or service.metadata.get("api_id")
-        or service.metadata.get("cluster_name")
-        or service.metadata.get("cache_cluster_id")
-    )
+    resource_id = None
+    if resource_type == "AWS::EC2::Instance":
+        resource_id = service.metadata.get("instance_id")
+    elif resource_type == "AWS::EC2::VPC":
+        resource_id = service.metadata.get("vpc_id")
+    elif resource_type == "AWS::EC2::Subnet":
+        resource_id = service.metadata.get("subnet_id")
+    elif resource_type == "AWS::EC2::SecurityGroup":
+        resource_id = service.metadata.get("security_group_id")
+    elif resource_type == "AWS::RDS::DBInstance":
+        resource_id = service.metadata.get("db_instance_identifier")
+    elif resource_type == "AWS::Lambda::Function":
+        resource_id = service.metadata.get("function_name")
+    elif resource_type == "AWS::SQS::Queue":
+        resource_id = service.metadata.get("queue_name")
+    elif resource_type == "AWS::SNS::Topic":
+        resource_id = service.metadata.get("topic_name")
+    elif resource_type == "AWS::ApiGateway::RestApi":
+        resource_id = service.metadata.get("api_id")
+    elif resource_type == "AWS::ECS::Service":
+        resource_id = service.metadata.get("service_name")
+    elif resource_type == "AWS::ECS::Cluster":
+        resource_id = service.metadata.get("cluster_name")
+    elif resource_type == "AWS::EKS::Cluster":
+        resource_id = service.metadata.get("cluster_name")
+    elif resource_type == "AWS::ElastiCache::CacheCluster":
+        resource_id = service.metadata.get("cache_cluster_id")
+    elif resource_type == "AWS::ECR::Repository":
+        resource_id = service.metadata.get("repository_name")
+    elif resource_type == "AWS::ElasticLoadBalancingV2::TargetGroup":
+        resource_id = service.metadata.get("target_group_name")
+    elif resource_type == "AWS::ElasticLoadBalancingV2::LoadBalancer":
+        resource_id = service.metadata.get("load_balancer_name")
     if not resource_id:
         return None
     return {"resourceType": resource_type, "resourceId": resource_id}
@@ -1443,9 +1848,18 @@ def _service_identifier_index(services: list[ServiceRecord]) -> dict[str, str]:
             service.metadata.get("topic_name"),
             service.metadata.get("api_id"),
             service.metadata.get("api_name"),
+            service.metadata.get("service_name"),
             service.metadata.get("cluster_name"),
             service.metadata.get("cache_cluster_id"),
             service.metadata.get("distribution_id"),
+            service.metadata.get("vpc_id"),
+            service.metadata.get("subnet_id"),
+            service.metadata.get("security_group_id"),
+            service.metadata.get("group_name"),
+            service.metadata.get("target_group_name"),
+            service.metadata.get("load_balancer_name"),
+            service.metadata.get("repository_name"),
+            service.metadata.get("repository_uri"),
         }:
             if candidate:
                 index[str(candidate)] = service.resource_id

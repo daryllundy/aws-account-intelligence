@@ -73,6 +73,34 @@ def test_dependency_graph_includes_config_iam_cloudtrail_and_xray_edges_from_liv
         and edge.to_resource_id.endswith("orders-db-us-west-2")
         for edge in edges
     )
+    assert any(
+        edge.edge_type is EdgeType.CONFIG
+        and edge.evidence_source == "ecs.service_load_balancer"
+        and edge.from_resource_id.endswith("service/orders-us-west-2/website")
+        and edge.to_resource_id.endswith("targetgroup/orders-web/abc123")
+        for edge in edges
+    )
+    assert any(
+        edge.edge_type is EdgeType.CONFIG
+        and edge.evidence_source == "elbv2.target_group_attachment"
+        and edge.from_resource_id.endswith("targetgroup/orders-web/abc123")
+        and edge.to_resource_id.endswith("loadbalancer/app/orders-web/def456")
+        for edge in edges
+    )
+    assert any(
+        edge.edge_type is EdgeType.CONFIG
+        and edge.evidence_source == "ecs.task_definition_image"
+        and edge.from_resource_id.endswith("service/orders-us-west-2/website")
+        and edge.to_resource_id.endswith("repository/orders-web")
+        for edge in edges
+    )
+    assert any(
+        edge.edge_type is EdgeType.NETWORK
+        and edge.evidence_source == "network.direct_attachment"
+        and edge.from_resource_id.endswith("service/orders-us-west-2/website")
+        and edge.to_resource_id.endswith("subnet/subnet-app")
+        for edge in edges
+    )
 
 
 def test_impact_analysis_reports_transitive_dependency_chains() -> None:

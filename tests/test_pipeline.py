@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from datetime import date
+from enum import Enum
 import json
 
 from aws_account_intelligence.config import get_settings
 from aws_account_intelligence.collectors.base import DiscoveryBundle, ScanWarning
-from aws_account_intelligence.models import AttributionMethod, CostAttribution, CostPoint, ResourceStatus, ServiceRecord
+from aws_account_intelligence.models import AttributionMethod, CostAttribution, CostPoint, DependencyEdge, EdgeType, ResourceStatus, ServiceRecord
 from aws_account_intelligence.pipeline import ScanPipeline
 from aws_account_intelligence.storage import Database
 
@@ -223,3 +225,111 @@ def test_scan_pipeline_benchmark_writes_audit_record() -> None:
     audit_files = list((settings.output_dir / "audit").glob("*.jsonl"))
     records = [json.loads(line) for line in audit_files[0].read_text().splitlines()]
     assert any(record["event_type"] == "scan_benchmark_completed" for record in records)
+
+
+class SampleEnum(str, Enum):
+    VALUE = "value"
+
+
+def test_database_normalizes_service_metadata_to_json_safe_values() -> None:
+    settings = get_settings()
+    database = Database(settings.database_url)
+    database.create_all()
+    now = datetime.now(UTC)
+
+    record = ServiceRecord(
+        resource_id="arn:aws:s3:::orders-bucket",
+        arn="arn:aws:s3:::orders-bucket",
+        resource_type="AWS::S3::Bucket",
+        service_name="s3",
+        region="us-west-2",
+        account_id="123456789012",
+        status=ResourceStatus.UNKNOWN,
+        last_seen_at=now,
+        scan_run_id="scan-1",
+        metadata={
+            "creation_date": now,
+            "effective_date": date(2026, 3, 6),
+            "status_enum": SampleEnum.VALUE,
+            "nested": {
+                "items": [now, date(2026, 3, 7), SampleEnum.VALUE, {"when": now}],
+            },
+        },
+    )
+
+    database.save_service_records([record])
+
+    saved = database.list_service_records("scan-1")
+
+    assert len(saved) == 1
+    assert saved[0].metadata == {
+        "creation_date": now.isoformat(),
+        "effective_date": "2026-03-06",
+        "status_enum": "value",
+        "nested": {
+            "items": [now.isoformat(), "2026-03-07", "value", {"when": now.isoformat()}],
+        },
+    }
+
+
+def test_database_normalizes_s3_style_creation_date_metadata() -> None:
+    settings = get_settings()
+    database = Database(settings.database_url)
+    database.create_all()
+    creation_date = datetime(2026, 3, 6, 12, 30, tzinfo=UTC)
+
+    record = ServiceRecord(
+        resource_id="arn:aws:s3:::example-bucket",
+        arn="arn:aws:s3:::example-bucket",
+        resource_type="AWS::S3::Bucket",
+        service_name="s3",
+        region="us-west-2",
+        account_id="123456789012",
+        status=ResourceStatus.UNKNOWN,
+        last_seen_at=creation_date,
+        scan_run_id="scan-s3",
+        metadata={
+            "bucket_name": "example-bucket",
+            "creation_date": creation_date,
+            "discovery_sources": ["tagging_api", "list_buckets"],
+        },
+    )
+
+    database.save_service_records([record])
+
+    saved = database.list_service_records("scan-s3")
+
+    assert saved[0].metadata["bucket_name"] == "example-bucket"
+    assert saved[0].metadata["creation_date"] == creation_date.isoformat()
+    assert saved[0].metadata["discovery_sources"] == ["tagging_api", "list_buckets"]
+
+
+def test_database_normalizes_dependency_edge_metadata() -> None:
+    settings = get_settings()
+    database = Database(settings.database_url)
+    database.create_all()
+    observed_at = datetime(2026, 3, 6, 14, 0, tzinfo=UTC)
+
+    edge = DependencyEdge(
+        from_resource_id="arn:aws:lambda:us-west-2:123:function:orders",
+        to_resource_id="arn:aws:sqs:us-west-2:123:orders-queue",
+        scan_run_id="scan-edge",
+        edge_type=EdgeType.EVENT,
+        evidence_source="test",
+        confidence=0.9,
+        rationale="Regression coverage",
+        metadata={
+            "observed_at": observed_at,
+            "related_dates": [date(2026, 3, 6)],
+        },
+    )
+
+    database.save_dependency_edges([edge])
+
+    saved = database.list_dependency_edges("scan-edge")
+
+    assert len(saved) == 1
+    assert saved[0].metadata == {
+        "observed_at": observed_at.isoformat(),
+        "related_dates": ["2026-03-06"],
+    }

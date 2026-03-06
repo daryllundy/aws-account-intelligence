@@ -14,6 +14,45 @@ class DependencyGraphBuilder:
 
         for service in services:
             metadata = service.metadata
+            for target_group_arn in metadata.get("target_group_arns", []):
+                if target_group_arn in by_id:
+                    edges.append(
+                        DependencyEdge(
+                            from_resource_id=service.resource_id,
+                            to_resource_id=target_group_arn,
+                            scan_run_id=scan_run_id,
+                            edge_type=EdgeType.CONFIG,
+                            evidence_source="ecs.service_load_balancer",
+                            confidence=0.9,
+                            rationale="ECS service is configured to register targets in this target group.",
+                        )
+                    )
+            for load_balancer_arn in metadata.get("load_balancer_arns", []):
+                if load_balancer_arn in by_id and service.resource_type == "AWS::ElasticLoadBalancingV2::TargetGroup":
+                    edges.append(
+                        DependencyEdge(
+                            from_resource_id=service.resource_id,
+                            to_resource_id=load_balancer_arn,
+                            scan_run_id=scan_run_id,
+                            edge_type=EdgeType.CONFIG,
+                            evidence_source="elbv2.target_group_attachment",
+                            confidence=0.9,
+                            rationale="Target group is attached to this load balancer.",
+                        )
+                    )
+            for repository_arn in metadata.get("ecr_repository_arns", []):
+                if repository_arn in by_id:
+                    edges.append(
+                        DependencyEdge(
+                            from_resource_id=service.resource_id,
+                            to_resource_id=repository_arn,
+                            scan_run_id=scan_run_id,
+                            edge_type=EdgeType.CONFIG,
+                            evidence_source="ecs.task_definition_image",
+                            confidence=0.85,
+                            rationale="ECS service task definition references a container image from this ECR repository.",
+                        )
+                    )
             for integration in metadata.get("integrations", []):
                 if integration in by_id:
                     edges.append(
@@ -121,7 +160,22 @@ class DependencyGraphBuilder:
 
     def _infer_network_edges(self, services: list[ServiceRecord], scan_run_id: str) -> list[DependencyEdge]:
         edges: list[DependencyEdge] = []
+        by_id = {service.resource_id: service for service in services}
         for source in services:
+            for related in _direct_network_targets(source):
+                target = _resolve_target_resource_id(related, by_id)
+                if target and target != source.resource_id:
+                    edges.append(
+                        DependencyEdge(
+                            from_resource_id=source.resource_id,
+                            to_resource_id=target,
+                            scan_run_id=scan_run_id,
+                            edge_type=EdgeType.NETWORK,
+                            evidence_source="network.direct_attachment",
+                            confidence=0.93,
+                            rationale="Resource is directly attached to this network resource through its configuration.",
+                        )
+                    )
             source_sgs = set(source.metadata.get("security_groups", []))
             if not source_sgs:
                 continue
@@ -176,6 +230,9 @@ class DependencyGraphBuilder:
 def _resolve_target_resource_id(related: str, by_id: dict[str, ServiceRecord]) -> str | None:
     if related in by_id:
         return related
+    prioritized = _resolve_structured_identifier(related, by_id)
+    if prioritized:
+        return prioritized
     for resource_id, service in by_id.items():
         if related in {
             resource_id,
@@ -186,10 +243,47 @@ def _resolve_target_resource_id(related: str, by_id: dict[str, ServiceRecord]) -
             service.metadata.get("queue_name"),
             service.metadata.get("topic_name"),
             service.metadata.get("api_id"),
+            service.metadata.get("service_name"),
             service.metadata.get("cluster_name"),
             service.metadata.get("cache_cluster_id"),
+            service.metadata.get("distribution_id"),
+            service.metadata.get("vpc_id"),
+            service.metadata.get("subnet_id"),
+            service.metadata.get("security_group_id"),
+            service.metadata.get("group_name"),
+            service.metadata.get("target_group_name"),
+            service.metadata.get("load_balancer_name"),
+            service.metadata.get("repository_name"),
+            service.metadata.get("repository_uri"),
         }:
             return resource_id
+    return None
+
+
+def _direct_network_targets(service: ServiceRecord) -> list[str]:
+    related: list[str] = []
+    if service.metadata.get("vpc_id"):
+        related.append(service.metadata["vpc_id"])
+    if service.metadata.get("subnet_id"):
+        related.append(service.metadata["subnet_id"])
+    related.extend(service.metadata.get("subnet_ids", []))
+    related.extend(service.metadata.get("security_groups", []))
+    return related
+
+
+def _resolve_structured_identifier(related: str, by_id: dict[str, ServiceRecord]) -> str | None:
+    if related.startswith("vpc-"):
+        for resource_id, service in by_id.items():
+            if service.resource_type == "AWS::EC2::VPC" and service.metadata.get("vpc_id") == related:
+                return resource_id
+    if related.startswith("subnet-"):
+        for resource_id, service in by_id.items():
+            if service.resource_type == "AWS::EC2::Subnet" and service.metadata.get("subnet_id") == related:
+                return resource_id
+    if related.startswith("sg-"):
+        for resource_id, service in by_id.items():
+            if service.resource_type == "AWS::EC2::SecurityGroup" and service.metadata.get("security_group_id") == related:
+                return resource_id
     return None
 
 
