@@ -79,7 +79,7 @@ export AAI_AWS_ORG_ROLE_NAME=aws-account-intelligence-readonly
 ### 4. Run the org smoke test
 
 ```bash
-python scripts/smoke_aws_orgs.py
+uv run python scripts/smoke_aws_orgs.py
 ```
 
 ## Rollout order
@@ -87,6 +87,6 @@ python scripts/smoke_aws_orgs.py
 1. Apply `terraform/org-member` in member accounts.
 2. Apply `terraform/org-management` in the management/scanner account.
 3. Set `AAI_DATA_SOURCE=aws_orgs`.
-4. Run `python scripts/smoke_aws_orgs.py`.
+4. Run `uv run python scripts/smoke_aws_orgs.py`.
 
 If you are using this repo as a personal single-account tool, you can ignore the `org-member` and `org-management` templates entirely.

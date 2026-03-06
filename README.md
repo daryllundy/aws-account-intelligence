@@ -22,9 +22,7 @@ docker compose up -d postgres
 ### 2. Install dependencies
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e '.[dev]'
+uv sync --extra dev
 ```
 
 ### 3. Configure environment
@@ -39,7 +37,7 @@ By default the project runs against fixture data. For the primary supported path
 
 ```bash
 export AAI_DATA_SOURCE=aws
-aws-account-intel scan run --output json
+uv run aws-account-intel scan run --output json
 ```
 
 ## CLI overview
@@ -47,46 +45,46 @@ aws-account-intel scan run --output json
 ### Scan
 
 ```bash
-aws-account-intel scan run --output json
-aws-account-intel scan status --latest --output json
-aws-account-intel scan delta --latest --output json
-aws-account-intel scan benchmark --runs 3 --output json
+uv run aws-account-intel scan run --output json
+uv run aws-account-intel scan status --latest --output json
+uv run aws-account-intel scan delta --latest --output json
+uv run aws-account-intel scan benchmark --runs 3 --output json
 ```
 
 ### Inventory, cost, graph, and impact
 
 ```bash
-aws-account-intel inventory list --latest --output table
-aws-account-intel inventory list --latest --account-id 123456789012 --output json
-aws-account-intel cost summary --latest --output json
-aws-account-intel cost summary --latest --account-id 123456789012 --output json
-aws-account-intel graph export --latest --output json
-aws-account-intel impact analyze --latest --resource arn:aws:lambda:us-west-2:123456789012:function:process-orders --output json
-aws-account-intel account summary --latest --output json
+uv run aws-account-intel inventory list --latest --output table
+uv run aws-account-intel inventory list --latest --account-id 123456789012 --output json
+uv run aws-account-intel cost summary --latest --output json
+uv run aws-account-intel cost summary --latest --account-id 123456789012 --output json
+uv run aws-account-intel graph export --latest --output json
+uv run aws-account-intel impact analyze --latest --resource arn:aws:lambda:us-west-2:123456789012:function:process-orders --output json
+uv run aws-account-intel account summary --latest --output json
 ```
 
 ### Scheduling
 
 ```bash
-aws-account-intel schedule create nightly --interval-hours 24 --output json
-aws-account-intel schedule list --output json
-aws-account-intel schedule run-due --output json
+uv run aws-account-intel schedule create nightly --interval-hours 24 --output json
+uv run aws-account-intel schedule list --output json
+uv run aws-account-intel schedule run-due --output json
 ```
 
 ### Reporting
 
 ```bash
-aws-account-intel report export --latest --format json
-aws-account-intel report export --latest --format csv
-aws-account-intel report export --latest --format pdf
-aws-account-intel report export --latest --format slack
-aws-account-intel report export --latest --format email
+uv run aws-account-intel report export --latest --format json
+uv run aws-account-intel report export --latest --format csv
+uv run aws-account-intel report export --latest --format pdf
+uv run aws-account-intel report export --latest --format slack
+uv run aws-account-intel report export --latest --format email
 ```
 
 ### IAM validation
 
 ```bash
-aws-account-intel iam validate --output json
+uv run aws-account-intel iam validate --output json
 ```
 
 ## Supported operating model
@@ -112,7 +110,7 @@ Production-ready for this repo means:
 Start the API:
 
 ```bash
-aws-account-intel api serve --host 127.0.0.1 --port 8000
+uv run aws-account-intel api serve --host 127.0.0.1 --port 8000
 ```
 
 Dashboard:
@@ -185,7 +183,7 @@ The current local AWS CLI identity resolves successfully, but the current AWS ac
 Run the checked-in smoke test only after IAM and Terraform setup is complete:
 
 ```bash
-python scripts/smoke_aws_orgs.py
+uv run python scripts/smoke_aws_orgs.py
 ```
 
 The smoke test:
